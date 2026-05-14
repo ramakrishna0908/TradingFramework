@@ -1,0 +1,305 @@
+//@version=5
+// =============================================================================
+// MTF Bearish Screener (13 Symbols, D/W/M) — counterpart to Bull Screener
+// -----------------------------------------------------------------------------
+// Layer 1 (Trend/Momentum, ALL true): price < EMA200, EMA9 < EMA21 < EMA50,
+// all three short EMAs FALLING (slope < 0),
+// MACD line < signal AND histogram < 0.
+// Layer 2 (Volume, ALL true): OBV < OBV-EMA(20) [distribution]
+// Volume > Volume-SMA(20) [confirmation]
+// Layer 3 (MTF): Daily / Daily+Weekly / Daily+Weekly+Monthly
+// 13 symbols \* 3 TFs = 39 request.security() calls (cap 40). Non-repainting.
+// =============================================================================
+indicator("MTF Bearish Screener (13 Symbols, D/W/M)",
+shorttitle = "Bear Screener 13",
+overlay = true)
+
+// -----------------------------------------------------------------------------
+// INPUTS
+// -----------------------------------------------------------------------------
+grpTrend = "Trend / Momentum"
+emaFast = input.int(9, "Fast EMA", minval = 1, group = grpTrend)
+emaMed = input.int(21, "Medium EMA", minval = 1, group = grpTrend)
+emaSlow = input.int(50, "Slow EMA", minval = 1, group = grpTrend)
+emaTrend = input.int(200, "Trend EMA", minval = 1, group = grpTrend)
+
+macdFast = input.int(12, "MACD Fast", minval = 1, group = grpTrend)
+macdSlow = input.int(26, "MACD Slow", minval = 1, group = grpTrend)
+macdSignal = input.int(9, "MACD Signal", minval = 1, group = grpTrend)
+
+grpVol = "Volume Confirmation"
+obvEmaLen = input.int(20, "OBV EMA Length", minval = 1, group = grpVol)
+volSmaLen = input.int(20, "Volume SMA Length", minval = 1, group = grpVol)
+
+grpMTF = "Multi-Timeframe"
+mtfMode = input.string("Daily + Weekly + Monthly",
+"Final Bearish requires",
+options = ["Daily only",
+"Daily + Weekly",
+"Daily + Weekly + Monthly"],
+group = grpMTF)
+
+grpScr = "Screener"
+tblPos = input.string("top_right", "Table Position",
+options = ["top_left","top_right","top_center",
+"middle_left","middle_right","middle_center",
+"bottom_left","bottom_right","bottom_center"],
+group = grpScr)
+showOnlyBear = input.bool(false, "Dim non-bearish rows", group = grpScr)
+
+// -----------------------------------------------------------------------------
+// SYMBOL LIST (13)
+// -----------------------------------------------------------------------------
+sym1 = "NASDAQ:QQQ"
+sym2 = "AMEX:SPY"
+sym3 = "NASDAQ:NVDA"
+sym4 = "NASDAQ:GOOGL"
+sym5 = "NASDAQ:AMZN"
+sym6 = "NASDAQ:META"
+sym7 = "NASDAQ:TSLA"
+sym8 = "NASDAQ:AVGO"
+sym9 = "NASDAQ:AMD"
+sym10 = "NASDAQ:NFLX"
+sym11 = "NASDAQ:MSFT"
+sym12 = "NASDAQ:AAPL"
+sym13 = "AMEX:IWM"
+
+// -----------------------------------------------------------------------------
+// CORE CALC — mirror of bull logic
+// -----------------------------------------------------------------------------
+calcAll() =>
+eFast = ta.ema(close, emaFast)
+eMed = ta.ema(close, emaMed)
+eSlow = ta.ema(close, emaSlow)
+eTrend = ta.ema(close, emaTrend)
+
+    // Bearish cascade: EMA9 < EMA21 < EMA50, all three falling
+    cascade    = (eFast < eMed) and (eMed < eSlow)
+    slopeOK    = (eFast < eFast[1]) and (eMed < eMed[1]) and (eSlow < eSlow[1])
+    belowTrend = close < eTrend
+
+    // MACD bearish
+    [macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+    macdBear = (macdLine < signalLine) and (histLine < 0)
+
+    layer1 = belowTrend and cascade and slopeOK and macdBear
+
+    // Volume confirmation — OBV below its EMA (distribution),
+    // current volume above its SMA (real participation in the move)
+    obvVal   = ta.obv
+    obvEma   = ta.ema(obvVal, obvEmaLen)
+    volSma   = ta.sma(volume, volSmaLen)
+
+    obvReady = bar_index >= obvEmaLen
+    volReady = bar_index >= volSmaLen
+
+    obvOK    = obvReady and (obvVal < obvEma)   // OBV BELOW EMA = distribution
+    volOK    = volReady and (volume  > volSma)  // unchanged — high vol confirms
+    layer2   = obvOK and volOK
+
+    volRatio = volSma > 0 ? volume / volSma : na
+    bearish  = layer1 and layer2
+
+    [bearish, obvOK, volOK, obvVal, volRatio]
+
+f_d(\_s) => request.security(\_s, "D", calcAll(), lookahead = barmerge.lookahead_off)
+f_w(\_s) => request.security(\_s, "W", calcAll(), lookahead = barmerge.lookahead_off)
+f_m(\_s) => request.security(\_s, "M", calcAll(), lookahead = barmerge.lookahead_off)
+
+// Daily
+[d1B,d1O,d1V,d1Obv,d1Vr] = f_d(sym1)
+[d2B,d2O,d2V,d2Obv,d2Vr] = f_d(sym2)
+[d3B,d3O,d3V,d3Obv,d3Vr] = f_d(sym3)
+[d4B,d4O,d4V,d4Obv,d4Vr] = f_d(sym4)
+[d5B,d5O,d5V,d5Obv,d5Vr] = f_d(sym5)
+[d6B,d6O,d6V,d6Obv,d6Vr] = f_d(sym6)
+[d7B,d7O,d7V,d7Obv,d7Vr] = f_d(sym7)
+[d8B,d8O,d8V,d8Obv,d8Vr] = f_d(sym8)
+[d9B,d9O,d9V,d9Obv,d9Vr] = f_d(sym9)
+[d10B,d10O,d10V,d10Obv,d10Vr] = f_d(sym10)
+[d11B,d11O,d11V,d11Obv,d11Vr] = f_d(sym11)
+[d12B,d12O,d12V,d12Obv,d12Vr] = f_d(sym12)
+[d13B,d13O,d13V,d13Obv,d13Vr] = f_d(sym13)
+
+// Weekly
+[w1B,w1O,w1V,w1Obv,w1Vr] = f_w(sym1)
+[w2B,w2O,w2V,w2Obv,w2Vr] = f_w(sym2)
+[w3B,w3O,w3V,w3Obv,w3Vr] = f_w(sym3)
+[w4B,w4O,w4V,w4Obv,w4Vr] = f_w(sym4)
+[w5B,w5O,w5V,w5Obv,w5Vr] = f_w(sym5)
+[w6B,w6O,w6V,w6Obv,w6Vr] = f_w(sym6)
+[w7B,w7O,w7V,w7Obv,w7Vr] = f_w(sym7)
+[w8B,w8O,w8V,w8Obv,w8Vr] = f_w(sym8)
+[w9B,w9O,w9V,w9Obv,w9Vr] = f_w(sym9)
+[w10B,w10O,w10V,w10Obv,w10Vr] = f_w(sym10)
+[w11B,w11O,w11V,w11Obv,w11Vr] = f_w(sym11)
+[w12B,w12O,w12V,w12Obv,w12Vr] = f_w(sym12)
+[w13B,w13O,w13V,w13Obv,w13Vr] = f_w(sym13)
+
+// Monthly
+[m1B,m1O,m1V,m1Obv,m1Vr] = f_m(sym1)
+[m2B,m2O,m2V,m2Obv,m2Vr] = f_m(sym2)
+[m3B,m3O,m3V,m3Obv,m3Vr] = f_m(sym3)
+[m4B,m4O,m4V,m4Obv,m4Vr] = f_m(sym4)
+[m5B,m5O,m5V,m5Obv,m5Vr] = f_m(sym5)
+[m6B,m6O,m6V,m6Obv,m6Vr] = f_m(sym6)
+[m7B,m7O,m7V,m7Obv,m7Vr] = f_m(sym7)
+[m8B,m8O,m8V,m8Obv,m8Vr] = f_m(sym8)
+[m9B,m9O,m9V,m9Obv,m9Vr] = f_m(sym9)
+[m10B,m10O,m10V,m10Obv,m10Vr] = f_m(sym10)
+[m11B,m11O,m11V,m11Obv,m11Vr] = f_m(sym11)
+[m12B,m12O,m12V,m12Obv,m12Vr] = f_m(sym12)
+[m13B,m13O,m13V,m13Obv,m13Vr] = f_m(sym13)
+
+// -----------------------------------------------------------------------------
+// FINAL MTF DECISION PER SYMBOL
+// -----------------------------------------------------------------------------
+f_final(\_d, \_w, \_m) =>
+mtfMode == "Daily only" ? \_d :
+mtfMode == "Daily + Weekly" ? (\_d and \_w) :
+(\_d and \_w and \_m)
+
+final1 = f_final(d1B, w1B, m1B)
+final2 = f_final(d2B, w2B, m2B)
+final3 = f_final(d3B, w3B, m3B)
+final4 = f_final(d4B, w4B, m4B)
+final5 = f_final(d5B, w5B, m5B)
+final6 = f_final(d6B, w6B, m6B)
+final7 = f_final(d7B, w7B, m7B)
+final8 = f_final(d8B, w8B, m8B)
+final9 = f_final(d9B, w9B, m9B)
+final10 = f_final(d10B, w10B, m10B)
+final11 = f_final(d11B, w11B, m11B)
+final12 = f_final(d12B, w12B, m12B)
+final13 = f_final(d13B, w13B, m13B)
+
+// -----------------------------------------------------------------------------
+// TABLE
+// -----------------------------------------------------------------------------
+f_pos(\_p) =>
+\_p == "top_left" ? position.top_left :
+\_p == "top_center" ? position.top_center :
+\_p == "top_right" ? position.top_right :
+\_p == "middle_left" ? position.middle_left :
+\_p == "middle_center" ? position.middle_center :
+\_p == "middle_right" ? position.middle_right :
+\_p == "bottom_left" ? position.bottom_left :
+\_p == "bottom_center" ? position.bottom_center :
+position.bottom_right
+
+// 5 cols (Symbol | D | W | M | MTF), 14 rows (header + 13 tickers)
+var table scr = table.new(f_pos(tblPos), 5, 14,
+border_width = 1,
+frame_color = color.gray,
+frame_width = 1)
+
+f_mark(b) => b ? "✅" : "❌"
+
+f_tt(\_obv, \_vr) =>
+"OBV: " + str.tostring(\_obv, format.volume) +
+"\nVol/Vol-SMA: " + (na(\_vr) ? "n/a" : str.tostring(\_vr, "#.##"))
+
+f_cellTF(\_col, \_row, \_bear, \_obvOK, \_volOK, \_obv, \_vr) =>
+bg = \_bear ? color.new(color.red, 60) : color.new(color.green, 80)
+txt = f_mark(\_bear) +
+"\nOBV " + f_mark(\_obvOK) +
+" Vol " + f_mark(\_volOK)
+table.cell(scr, \_col, \_row, txt,
+bgcolor = bg,
+text_size = size.tiny,
+text_color = color.white,
+tooltip = f_tt(\_obv, \_vr))
+
+f_row(\_r, \_sym,
+\_dB,\_dO,\_dV,\_dObv,\_dVr,
+\_wB,\_wO,\_wV,\_wObv,\_wVr,
+\_mB,\_mO,\_mV,\_mObv,\_mVr,
+\_final) =>
+finalBg = \_final ? color.new(color.red, 40)
+: (showOnlyBear ? color.new(color.gray, 85) : color.new(color.green, 75))
+table.cell(scr, 0, \_r, \_sym,
+bgcolor = finalBg,
+text_size = size.small,
+text_color= color.white)
+f_cellTF(1, \_r, \_dB, \_dO, \_dV, \_dObv, \_dVr)
+f_cellTF(2, \_r, \_wB, \_wO, \_wV, \_wObv, \_wVr)
+f_cellTF(3, \_r, \_mB, \_mO, \_mV, \_mObv, \_mVr)
+table.cell(scr, 4, \_r, f_mark(\_final),
+bgcolor = finalBg,
+text_size = size.small,
+text_color = color.white)
+
+if barstate.islast
+hdrBg = color.new(color.black, 60)
+table.cell(scr, 0, 0, "Symbol", bgcolor = hdrBg, text_color = color.white, text_size = size.small)
+table.cell(scr, 1, 0, "Daily", bgcolor = hdrBg, text_color = color.white, text_size = size.small)
+table.cell(scr, 2, 0, "Weekly", bgcolor = hdrBg, text_color = color.white, text_size = size.small)
+table.cell(scr, 3, 0, "Monthly", bgcolor = hdrBg, text_color = color.white, text_size = size.small)
+table.cell(scr, 4, 0, "MTF", bgcolor = hdrBg, text_color = color.white, text_size = size.small)
+
+    f_row(1,  sym1,
+          d1B,d1O,d1V,d1Obv,d1Vr, w1B,w1O,w1V,w1Obv,w1Vr, m1B,m1O,m1V,m1Obv,m1Vr,
+          final1)
+    f_row(2,  sym2,
+          d2B,d2O,d2V,d2Obv,d2Vr, w2B,w2O,w2V,w2Obv,w2Vr, m2B,m2O,m2V,m2Obv,m2Vr,
+          final2)
+    f_row(3,  sym3,
+          d3B,d3O,d3V,d3Obv,d3Vr, w3B,w3O,w3V,w3Obv,w3Vr, m3B,m3O,m3V,m3Obv,m3Vr,
+          final3)
+    f_row(4,  sym4,
+          d4B,d4O,d4V,d4Obv,d4Vr, w4B,w4O,w4V,w4Obv,w4Vr, m4B,m4O,m4V,m4Obv,m4Vr,
+          final4)
+    f_row(5,  sym5,
+          d5B,d5O,d5V,d5Obv,d5Vr, w5B,w5O,w5V,w5Obv,w5Vr, m5B,m5O,m5V,m5Obv,m5Vr,
+          final5)
+    f_row(6,  sym6,
+          d6B,d6O,d6V,d6Obv,d6Vr, w6B,w6O,w6V,w6Obv,w6Vr, m6B,m6O,m6V,m6Obv,m6Vr,
+          final6)
+    f_row(7,  sym7,
+          d7B,d7O,d7V,d7Obv,d7Vr, w7B,w7O,w7V,w7Obv,w7Vr, m7B,m7O,m7V,m7Obv,m7Vr,
+          final7)
+    f_row(8,  sym8,
+          d8B,d8O,d8V,d8Obv,d8Vr, w8B,w8O,w8V,w8Obv,w8Vr, m8B,m8O,m8V,m8Obv,m8Vr,
+          final8)
+    f_row(9,  sym9,
+          d9B,d9O,d9V,d9Obv,d9Vr, w9B,w9O,w9V,w9Obv,w9Vr, m9B,m9O,m9V,m9Obv,m9Vr,
+          final9)
+    f_row(10, sym10,
+          d10B,d10O,d10V,d10Obv,d10Vr, w10B,w10O,w10V,w10Obv,w10Vr, m10B,m10O,m10V,m10Obv,m10Vr,
+          final10)
+    f_row(11, sym11,
+          d11B,d11O,d11V,d11Obv,d11Vr, w11B,w11O,w11V,w11Obv,w11Vr, m11B,m11O,m11V,m11Obv,m11Vr,
+          final11)
+    f_row(12, sym12,
+          d12B,d12O,d12V,d12Obv,d12Vr, w12B,w12O,w12V,w12Obv,w12Vr, m12B,m12O,m12V,m12Obv,m12Vr,
+          final12)
+    f_row(13, sym13,
+          d13B,d13O,d13V,d13Obv,d13Vr, w13B,w13O,w13V,w13Obv,w13Vr, m13B,m13O,m13V,m13Obv,m13Vr,
+          final13)
+
+// -----------------------------------------------------------------------------
+// ALERTS
+// -----------------------------------------------------------------------------
+anyNewBear = (final1 and not final1[1]) or (final2 and not final2[1]) or
+(final3 and not final3[1]) or (final4 and not final4[1]) or
+(final5 and not final5[1]) or (final6 and not final6[1]) or
+(final7 and not final7[1]) or (final8 and not final8[1]) or
+(final9 and not final9[1]) or (final10 and not final10[1]) or
+(final11 and not final11[1]) or (final12 and not final12[1]) or
+(final13 and not final13[1])
+
+anyNewBull = (not final1 and final1[1]) or (not final2 and final2[1]) or
+(not final3 and final3[1]) or (not final4 and final4[1]) or
+(not final5 and final5[1]) or (not final6 and final6[1]) or
+(not final7 and final7[1]) or (not final8 and final8[1]) or
+(not final9 and final9[1]) or (not final10 and final10[1]) or
+(not final11 and final11[1]) or (not final12 and final12[1]) or
+(not final13 and final13[1])
+
+alertcondition(anyNewBear,
+title = "Watchlist: New Bearish (Puts in season)",
+message = "A symbol in the watchlist just turned MTF bearish")
+
+alertcondition(anyNewBull,
+title = "Watchlist: Bearish Exit",
+message = "A symbol in the watchlist just turned OFF bearish - exit puts")
