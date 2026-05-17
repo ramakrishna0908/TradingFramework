@@ -1,0 +1,210 @@
+//@version=6
+// ============================================================
+//  Weekly Options Scout — 20 Tickers + Discord
+//
+//  HOW IT WORKS (see bottom of file for full explanation):
+//  - Runs on Daily timeframe, scanning 20 high-liquidity tickers
+//  - Each bar scores 0-7 bullish/bearish points across 7 indicators
+//  - When score crosses min threshold for N consecutive bars → alert fires
+//  - Alert sent as Discord JSON webhook payload
+//  - Table shows live score, RSI, Vol status for all 20 symbols
+// ============================================================
+indicator("Weekly Options Scout — 20 Tickers + Discord", overlay=true, max_bars_back=500)
+
+// ============================================================
+//  SETTINGS — Signal Filters
+// ============================================================
+var g1 = "Signal Filters — uncheck to ignore"
+use_cpr  = input.bool(true, "CPR Breakout  (TC/BC levels)",  group=g1, tooltip="Price above Top Central (TC) = bullish. Price below Bottom Central (BC) = bearish.")
+use_bb   = input.bool(true, "Bollinger Bands Breakout",      group=g1, tooltip="Close above upper band = bull point. Close below lower band = bear point.")
+use_ema  = input.bool(true, "EMA Cross  (fast above slow)",  group=g1, tooltip="Fast EMA > Slow EMA and price above fast EMA = bull point. Reverse for bear.")
+use_rsi  = input.bool(true, "RSI Momentum",                  group=g1, tooltip="RSI above bull level = bull point. RSI below bear level = bear point.")
+use_cmf  = input.bool(true, "Chaikin Money Flow",            group=g1, tooltip="CMF > threshold = institutional buying (bull point). CMF < -threshold = selling.")
+use_ichi = input.bool(true, "Ichimoku Trend  (conv/base)",   group=g1, tooltip="Price > Conversion > Base = bullish trend structure. Reverse for bear.")
+use_vol  = input.bool(true, "Volume Surge Confirmation",     group=g1, tooltip="Volume above SMA * multiplier AND price on the right side of CPR = confirmation.")
+
+// ============================================================
+//  SETTINGS — Indicator Parameters
+// ============================================================
+var g2 = "Indicator Parameters"
+ema_f   = input.int(20,    "EMA Fast Period",    minval=5,              group=g2)
+ema_s   = input.int(50,    "EMA Slow Period",    minval=10,             group=g2)
+bb_l    = input.int(20,    "BB Length",          minval=5,              group=g2)
+bb_m    = input.float(2.0, "BB StdDev",          step=0.5,              group=g2)
+rsi_l   = input.int(14,    "RSI Length",         minval=2,              group=g2)
+rsi_b   = input.int(55,    "RSI Bullish Level",  minval=50, maxval=80,  group=g2, tooltip="RSI must be ABOVE this to score a bull point.")
+rsi_br  = input.int(45,    "RSI Bearish Level",  minval=20, maxval=50,  group=g2, tooltip="RSI must be BELOW this to score a bear point.")
+cmf_l   = input.int(20,    "CMF Length",         minval=5,              group=g2)
+cmf_t   = input.float(0.05,"CMF Threshold",      step=0.01,             group=g2, tooltip="Absolute CMF value must exceed this to count.")
+vol_m   = input.float(1.5, "Volume Surge Mult",  step=0.1,              group=g2, tooltip="Volume must be > this x 20-day avg to count as a surge.")
+min_sc  = input.int(3,     "Min Score to Alert", minval=1, maxval=7,    group=g2, tooltip="Alert fires when score reaches this threshold.")
+cbar    = input.int(1,     "Confirmation Bars",  minval=1, maxval=3,    group=g2, tooltip="Score must hold for this many bars before alerting.")
+
+// ============================================================
+//  SETTINGS — Options
+// ============================================================
+var g3 = "Options Settings"
+otm_p = input.float(1.0, "OTM Strike % from price", step=0.5, group=g3, tooltip="Distance OTM. Rounds to nearest $5 (or $1 for sub-$50).")
+dte_i = input.int(7,     "Days to Expiry (DTE)",    minval=1, maxval=60, group=g3, tooltip="Calendar days to expiry for the label in Discord alert.")
+
+// ============================================================
+//  HELPERS
+// ============================================================
+_mn(int m) => m == 1 ? "JAN" : m == 2 ? "FEB" : m == 3 ? "MAR" : m == 4 ? "APR" : m == 5 ? "MAY" : m == 6 ? "JUN" : m == 7 ? "JUL" : m == 8 ? "AUG" : m == 9 ? "SEP" : m == 10 ? "OCT" : m == 11 ? "NOV" : "DEC"
+
+ets  = time + dte_i * 86400000
+elbl = _mn(month(ets)) + " " + str.tostring(dayofmonth(ets))
+NL   = "\\n"
+
+_cf(int sc)       => sc >= 5 ? "HIGH" : sc >= 3 ? "MED" : "LOW"
+_prem(float atr)  => str.tostring(math.max(atr * 0.35, 0.10), "#.##")
+
+// ============================================================
+//  SCANNER
+//  Single request.security call per symbol (Daily TF).
+//  BB computed manually — ta.bb().upper/.lower fails inside request.security.
+// ============================================================
+f_scan(string sym) =>
+    [dH, dL, dC, dV, pH, pL, pC, vsma, atr14, rsi_v, ef, es, bbu, bbl, cmf_v, ich_c, ich_b] = request.security(sym, "D", [high, low, close, volume, high[1], low[1], close[1], ta.sma(volume, 20), ta.atr(14), ta.rsi(close, rsi_l), ta.ema(close, ema_f), ta.ema(close, ema_s), ta.sma(close, bb_l) + bb_m * ta.stdev(close, bb_l), ta.sma(close, bb_l) - bb_m * ta.stdev(close, bb_l), ta.sma((high - low) > 0 ? ((close - low) - (high - close)) / (high - low) * volume : 0.0, cmf_l) / math.max(ta.sma(volume, cmf_l), 1), (ta.highest(high, 9) + ta.lowest(low, 9)) / 2, (ta.highest(high, 26) + ta.lowest(low, 26)) / 2], lookahead=barmerge.lookahead_off)
+
+    pp   = (pH + pL + pC) / 3
+    bc   = (pH + pL) / 2
+    tc   = 2 * pp - bc
+    r1   = 2 * pp - pL
+    s1   = 2 * pp - pH
+    r2   = pp + (pH - pL)
+    s2   = pp - (pH - pL)
+
+    cbull = use_cpr  and dC > tc                        ? 1 : 0
+    cbear = use_cpr  and dC < bc                        ? 1 : 0
+    bbull = use_bb   and dC > bbu                       ? 1 : 0
+    bbear = use_bb   and dC < bbl                       ? 1 : 0
+    ebull = use_ema  and ef > es and dC > ef            ? 1 : 0
+    ebear = use_ema  and ef < es and dC < ef            ? 1 : 0
+    rbull = use_rsi  and rsi_v > rsi_b                  ? 1 : 0
+    rbear = use_rsi  and rsi_v < rsi_br                 ? 1 : 0
+    cfbul = use_cmf  and cmf_v >  cmf_t                 ? 1 : 0
+    cfbea = use_cmf  and cmf_v < -cmf_t                 ? 1 : 0
+    ibull = use_ichi and dC > ich_c and ich_c > ich_b   ? 1 : 0
+    ibear = use_ichi and dC < ich_c and ich_c < ich_b   ? 1 : 0
+    vbull = use_vol  and dV > vsma * vol_m and dC > tc  ? 1 : 0
+    vbear = use_vol  and dV > vsma * vol_m and dC < bc  ? 1 : 0
+
+    bsc  = cbull + bbull + ebull + rbull + cfbul + ibull + vbull
+    esc  = cbear + bbear + ebear + rbear + cfbea + ibear + vbear
+    rt   = dC >= 50 ? 5.0 : 1.0
+    putk = math.floor(dC * (1 - otm_p / 100) / rt) * rt
+    calk = math.ceil( dC * (1 + otm_p / 100) / rt) * rt
+
+    [dC, bsc, esc, bc, tc, s1, s2, r1, r2, atr14, rsi_v, dV > vsma * vol_m, putk, calk]
+
+// ============================================================
+//  UNPACK — Top 20 high-liquidity weekly options tickers
+// ============================================================
+[p1,  bu1,  be1,  bc1,  tc1,  s11,  s21,  r11,  r21,  a1,  rs1,  v1,  pk1,  ck1]  = f_scan("AMEX:SPY")
+[p2,  bu2,  be2,  bc2,  tc2,  s12,  s22,  r12,  r22,  a2,  rs2,  v2,  pk2,  ck2]  = f_scan("NASDAQ:QQQ")
+[p3,  bu3,  be3,  bc3,  tc3,  s13,  s23,  r13,  r23,  a3,  rs3,  v3,  pk3,  ck3]  = f_scan("AMEX:IWM")
+[p4,  bu4,  be4,  bc4,  tc4,  s14,  s24,  r14,  r24,  a4,  rs4,  v4,  pk4,  ck4]  = f_scan("NASDAQ:AAPL")
+[p5,  bu5,  be5,  bc5,  tc5,  s15,  s25,  r15,  r25,  a5,  rs5,  v5,  pk5,  ck5]  = f_scan("NASDAQ:NVDA")
+[p6,  bu6,  be6,  bc6,  tc6,  s16,  s26,  r16,  r26,  a6,  rs6,  v6,  pk6,  ck6]  = f_scan("NASDAQ:TSLA")
+[p7,  bu7,  be7,  bc7,  tc7,  s17,  s27,  r17,  r27,  a7,  rs7,  v7,  pk7,  ck7]  = f_scan("NASDAQ:AMZN")
+[p8,  bu8,  be8,  bc8,  tc8,  s18,  s28,  r18,  r28,  a8,  rs8,  v8,  pk8,  ck8]  = f_scan("NASDAQ:META")
+[p9,  bu9,  be9,  bc9,  tc9,  s19,  s29,  r19,  r29,  a9,  rs9,  v9,  pk9,  ck9]  = f_scan("NASDAQ:MSFT")
+[p10, bu10, be10, bc10, tc10, s110, s210, r110, r210, a10, rs10, v10, pk10, ck10] = f_scan("NASDAQ:GOOGL")
+[p11, bu11, be11, bc11, tc11, s111, s211, r111, r211, a11, rs11, v11, pk11, ck11] = f_scan("NASDAQ:AMD")
+[p12, bu12, be12, bc12, tc12, s112, s212, r112, r212, a12, rs12, v12, pk12, ck12] = f_scan("NASDAQ:COIN")
+[p13, bu13, be13, bc13, tc13, s113, s213, r113, r213, a13, rs13, v13, pk13, ck13] = f_scan("NASDAQ:PLTR")
+[p14, bu14, be14, bc14, tc14, s114, s214, r114, r214, a14, rs14, v14, pk14, ck14] = f_scan("NASDAQ:NFLX")
+[p15, bu15, be15, bc15, tc15, s115, s215, r115, r215, a15, rs15, v15, pk15, ck15] = f_scan("NASDAQ:AVGO")
+[p16, bu16, be16, bc16, tc16, s116, s216, r116, r216, a16, rs16, v16, pk16, ck16] = f_scan("NYSE:BA")
+[p17, bu17, be17, bc17, tc17, s117, s217, r117, r217, a17, rs17, v17, pk17, ck17] = f_scan("NASDAQ:INTC")
+[p18, bu18, be18, bc18, tc18, s118, s218, r118, r218, a18, rs18, v18, pk18, ck18] = f_scan("NYSE:BAC")
+[p19, bu19, be19, bc19, tc19, s119, s219, r119, r219, a19, rs19, v19, pk19, ck19] = f_scan("NASDAQ:MU")
+[p20, bu20, be20, bc20, tc20, s120, s220, r120, r220, a20, rs20, v20, pk20, ck20] = f_scan("NYSE:DIS")
+
+// ============================================================
+//  ALERT FUNCTION
+// ============================================================
+f_alert(string sym, float pr, int bsc, int esc, float bc, float tc, float s1, float s2, float r1, float r2, float atr, float putk, float calk) =>
+    ba   = bsc >= min_sc
+    ea   = esc >= min_sc
+    bk   = ba and (cbar < 2 or bsc[1] >= min_sc) and (cbar < 3 or bsc[2] >= min_sc)
+    ek   = ea and (cbar < 2 or esc[1] >= min_sc) and (cbar < 3 or esc[2] >= min_sc)
+    bf   = bk and not (bsc[cbar] >= min_sc)
+    ef   = ek and not (esc[cbar] >= min_sc)
+    prem = _prem(atr)
+    cbs  = str.tostring(cbar)
+    cfs  = _cf(math.max(bsc, esc))
+
+    if bf
+        sig = pr > tc ? "CPR TC Break" : "EMA + Momentum"
+        alert('{"content":"@bot BOUGHT | ' + sym + " " + elbl + " " + str.tostring(calk, "#") + "C $" + prem + NL + "Signal: " + sig + " [" + cfs + " conf] (" + cbs + "-bar confirmed)" + NL + "Trigger: $" + str.tostring(tc, "#.##") + " (TC) cleared" + NL + "Targets: R1 $" + str.tostring(r1, "#.##") + " R2 $" + str.tostring(r2, "#.##") + NL + "Stop: Below TC $" + str.tostring(tc, "#.##") + '"}', alert.freq_once_per_bar)
+
+    if ef
+        sig = pr < bc ? "CPR BC Break" : "EMA + Momentum"
+        alert('{"content":"@bot BOUGHT | ' + sym + " " + elbl + " " + str.tostring(putk, "#") + "P $" + prem + NL + "Signal: " + sig + " [" + cfs + " conf] (" + cbs + "-bar confirmed)" + NL + "Trigger: $" + str.tostring(bc, "#.##") + " (BC) broken" + NL + "Targets: S1 $" + str.tostring(s1, "#.##") + " S2 $" + str.tostring(s2, "#.##") + NL + "Stop: Above BC $" + str.tostring(bc, "#.##") + '"}', alert.freq_once_per_bar)
+
+// ============================================================
+//  FIRE ALERTS
+// ============================================================
+f_alert("SPY",   p1,  bu1,  be1,  bc1,  tc1,  s11,  s21,  r11,  r21,  a1,  pk1,  ck1)
+f_alert("QQQ",   p2,  bu2,  be2,  bc2,  tc2,  s12,  s22,  r12,  r22,  a2,  pk2,  ck2)
+f_alert("IWM",   p3,  bu3,  be3,  bc3,  tc3,  s13,  s23,  r13,  r23,  a3,  pk3,  ck3)
+f_alert("AAPL",  p4,  bu4,  be4,  bc4,  tc4,  s14,  s24,  r14,  r24,  a4,  pk4,  ck4)
+f_alert("NVDA",  p5,  bu5,  be5,  bc5,  tc5,  s15,  s25,  r15,  r25,  a5,  pk5,  ck5)
+f_alert("TSLA",  p6,  bu6,  be6,  bc6,  tc6,  s16,  s26,  r16,  r26,  a6,  pk6,  ck6)
+f_alert("AMZN",  p7,  bu7,  be7,  bc7,  tc7,  s17,  s27,  r17,  r27,  a7,  pk7,  ck7)
+f_alert("META",  p8,  bu8,  be8,  bc8,  tc8,  s18,  s28,  r18,  r28,  a8,  pk8,  ck8)
+f_alert("MSFT",  p9,  bu9,  be9,  bc9,  tc9,  s19,  s29,  r19,  r29,  a9,  pk9,  ck9)
+f_alert("GOOGL", p10, bu10, be10, bc10, tc10, s110, s210, r110, r210, a10, pk10, ck10)
+f_alert("AMD",   p11, bu11, be11, bc11, tc11, s111, s211, r111, r211, a11, pk11, ck11)
+f_alert("COIN",  p12, bu12, be12, bc12, tc12, s112, s212, r112, r212, a12, pk12, ck12)
+f_alert("PLTR",  p13, bu13, be13, bc13, tc13, s113, s213, r113, r213, a13, pk13, ck13)
+f_alert("NFLX",  p14, bu14, be14, bc14, tc14, s114, s214, r114, r214, a14, pk14, ck14)
+f_alert("AVGO",  p15, bu15, be15, bc15, tc15, s115, s215, r115, r215, a15, pk15, ck15)
+f_alert("BA",    p16, bu16, be16, bc16, tc16, s116, s216, r116, r216, a16, pk16, ck16)
+f_alert("INTC",  p17, bu17, be17, bc17, tc17, s117, s217, r117, r217, a17, pk17, ck17)
+f_alert("BAC",   p18, bu18, be18, bc18, tc18, s118, s218, r118, r218, a18, pk18, ck18)
+f_alert("MU",    p19, bu19, be19, bc19, tc19, s119, s219, r119, r219, a19, pk19, ck19)
+f_alert("DIS",   p20, bu20, be20, bc20, tc20, s120, s220, r120, r220, a20, pk20, ck20)
+
+// ============================================================
+//  TABLE — Live scanner dashboard (top-right corner)
+// ============================================================
+var table t = table.new(position.top_right, 5, 22, bgcolor=color.new(color.black, 25), border_width=1, border_color=color.new(color.gray, 50))
+
+f_row(int row, string d, float pr, int bsc, int esc, float rsi, bool vol) =>
+    sig  = bsc >= min_sc ? "Bull " + str.tostring(bsc) : esc >= min_sc ? "Bear " + str.tostring(esc) : "-"
+    scol = bsc >= min_sc ? color.new(color.green, 0) : esc >= min_sc ? color.new(color.red, 0) : color.new(color.gray, 0)
+    table.cell(t, 0, row, d,                        text_color=color.white,                        text_size=size.small)
+    table.cell(t, 1, row, str.tostring(pr, "#.##"), text_color=color.white,                        text_size=size.small)
+    table.cell(t, 2, row, sig,                      text_color=scol,                               text_size=size.small)
+    table.cell(t, 3, row, str.tostring(rsi, "#.#"), text_color=rsi > 50 ? color.lime : color.red,  text_size=size.small)
+    table.cell(t, 4, row, vol ? "V" : "-",          text_color=vol ? color.lime : color.red,       text_size=size.small)
+
+if barstate.isconfirmed
+    table.cell(t, 0, 0, "Symbol", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "Price",  text_color=color.yellow, text_size=size.small)
+    table.cell(t, 2, 0, "Signal", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 3, 0, "RSI",    text_color=color.yellow, text_size=size.small)
+    table.cell(t, 4, 0, "Vol",    text_color=color.yellow, text_size=size.small)
+    f_row(1,  "SPY",   p1,  bu1,  be1,  rs1,  v1)
+    f_row(2,  "QQQ",   p2,  bu2,  be2,  rs2,  v2)
+    f_row(3,  "IWM",   p3,  bu3,  be3,  rs3,  v3)
+    f_row(4,  "AAPL",  p4,  bu4,  be4,  rs4,  v4)
+    f_row(5,  "NVDA",  p5,  bu5,  be5,  rs5,  v5)
+    f_row(6,  "TSLA",  p6,  bu6,  be6,  rs6,  v6)
+    f_row(7,  "AMZN",  p7,  bu7,  be7,  rs7,  v7)
+    f_row(8,  "META",  p8,  bu8,  be8,  rs8,  v8)
+    f_row(9,  "MSFT",  p9,  bu9,  be9,  rs9,  v9)
+    f_row(10, "GOOGL", p10, bu10, be10, rs10, v10)
+    f_row(11, "AMD",   p11, bu11, be11, rs11, v11)
+    f_row(12, "COIN",  p12, bu12, be12, rs12, v12)
+    f_row(13, "PLTR",  p13, bu13, be13, rs13, v13)
+    f_row(14, "NFLX",  p14, bu14, be14, rs14, v14)
+    f_row(15, "AVGO",  p15, bu15, be15, rs15, v15)
+    f_row(16, "BA",    p16, bu16, be16, rs16, v16)
+    f_row(17, "INTC",  p17, bu17, be17, rs17, v17)
+    f_row(18, "BAC",   p18, bu18, be18, rs18, v18)
+    f_row(19, "MU",    p19, bu19, be19, rs19, v19)
+    f_row(20, "DIS",   p20, bu20, be20, rs20, v20)

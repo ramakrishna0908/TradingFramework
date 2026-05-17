@@ -1,0 +1,145 @@
+//@version=6
+indicator("MTF CPR Confluence w/ RSI+Volume [Alert]", overlay=true)
+
+// ========================
+//  Inputs
+// ========================
+useTimeFilter = input.bool(true, "Use Time Filter (9:30-10:00 ET)")
+startHour = input.int(9, "Start Hour", minval=0, maxval=23)
+startMin  = input.int(30, "Start Minute", minval=0, maxval=59)
+endHour   = input.int(10, "End Hour", minval=0, maxval=23)
+endMin    = input.int(0, "End Minute", minval=0, maxval=59)
+
+useRSIFilter   = input.bool(true, "Require RSI > 50 for bullish, < 50 for bearish")
+rsiLength      = input.int(14, "RSI Length")
+useVolumeFilter = input.bool(true, "Require volume > SMA(volume,20) for confirmation")
+volSmaLength   = input.int(20, "Volume SMA Length")
+
+// ========================
+//  Time Filter
+// ========================
+inSession = not useTimeFilter or (hour == startHour and minute >= startMin) or (hour == endHour and minute <= endMin)
+
+// ========================
+//  Helper: Get previous bar's HLC from higher timeframe (repaint-safe)
+// ========================
+f_get_prev_hlc(_tf) =>
+    [request.security(syminfo.tickerid, _tf, high[1], lookahead=barmerge.lookahead_off),
+     request.security(syminfo.tickerid, _tf, low[1],  lookahead=barmerge.lookahead_off),
+     request.security(syminfo.tickerid, _tf, close[1],lookahead=barmerge.lookahead_off)]
+
+// ========================
+//  Fetch data for each timeframe
+// ========================
+[weekly_h, weekly_l, weekly_c] = f_get_prev_hlc("W")
+[daily_h,  daily_l,  daily_c]  = f_get_prev_hlc("D")
+[hourly_h, hourly_l, hourly_c] = f_get_prev_hlc("60")
+[min5_h,   min5_l,   min5_c]   = f_get_prev_hlc("5")
+
+// ========================
+//  CPR calculations
+// ========================
+calc_cpr(high_, low_, close_) =>
+    pp = (high_ + low_ + close_) / 3
+    bc = (high_ + low_) / 2
+    tc = 2 * pp - bc
+    [pp, bc, tc]
+
+[weekly_pp, weekly_bc, weekly_tc] = calc_cpr(weekly_h, weekly_l, weekly_c)
+[daily_pp,  daily_bc,  daily_tc]  = calc_cpr(daily_h,  daily_l,  daily_c)
+[hourly_pp, hourly_bc, hourly_tc] = calc_cpr(hourly_h, hourly_l, hourly_c)
+[min5_pp,   min5_bc,   min5_tc]   = calc_cpr(min5_h,   min5_l,   min5_c)
+
+// ========================
+//  RSI and Volume filters (on current chart's timeframe)
+// ========================
+rsi = ta.rsi(close, rsiLength)
+volSma = ta.sma(volume, volSmaLength)
+volumeOK = volume > volSma
+
+bullishFilter = (not useRSIFilter or rsi > 50) and (not useVolumeFilter or volumeOK)
+bearishFilter = (not useRSIFilter or rsi < 50) and (not useVolumeFilter or volumeOK)
+
+// ========================
+//  Confluence Score (0-100)
+// ========================
+bullish_tf(price, tc) => price > tc
+bearish_tf(price, bc) => price < bc
+
+bullish_count = (bullish_tf(close, weekly_tc) ? 1 : 0) + (bullish_tf(close, daily_tc)   ? 1 : 0) +  (bullish_tf(close, hourly_tc)  ? 1 : 0) + (bullish_tf(close, min5_tc)    ? 1 : 0)
+
+bearish_count = (bearish_tf(close, weekly_bc) ? 1 : 0) + (bearish_tf(close, daily_bc)   ? 1 : 0) + (bearish_tf(close, hourly_bc)  ? 1 : 0) +   (bearish_tf(close, min5_bc)    ? 1 : 0)
+
+bullish_score = (bullish_count / 4) * 100
+bearish_score = (bearish_count / 4) * 100
+
+// ========================
+//  Alert Conditions (2 out of 3 timeframes + RSI/Volume)
+// ========================
+// Bullish: 5min crosses above 1h TC
+bullish_signal_raw = ta.crossover(close, hourly_tc)
+// How many of the three higher TFs are bullish? (daily > daily_pp, weekly > weekly_pp, and optionally we already have 1h TC break)
+bullish_tf_agreement = (close > daily_pp ? 1 : 0) + (close > weekly_pp ? 1 : 0)
+// Require at least 2 out of these 3: 5min above 1h TC, daily > PP, weekly > PP
+bullish_alert = bullish_signal_raw and (bullish_tf_agreement >= 1) and bullishFilter
+// Note: 5min crossing 1h TC counts as one, so we need at least one more from daily/weekly → total 2 of 3.
+
+// Bearish: 5min crosses below 1h BC
+bearish_signal_raw = ta.crossunder(close, hourly_bc)
+bearish_tf_agreement = (close < daily_pp ? 1 : 0) + (close < weekly_pp ? 1 : 0)
+bearish_alert = bearish_signal_raw and (bearish_tf_agreement >= 1) and bearishFilter
+
+// ========================
+//  Plot CPR levels (same as before)
+// ========================
+plot(weekly_tc, "W TC", color.new(color.purple, 0), 2, plot.style_circles)
+plot(weekly_bc, "W BC", color.purple, 1, plot.style_circles)
+plot(weekly_pp, "W PP", color.white, 1, plot.style_circles)
+
+plot(daily_tc,  "D TC", color.new(color.blue, 0),   2, plot.style_circles)
+plot(daily_bc, "D BC", color.blue, 1, plot.style_circles)
+plot(daily_pp, "D PP", color.white, 1, plot.style_circles)
+
+plot(hourly_tc, "1h TC", color.new(color.green, 0), 2)
+plot(hourly_bc, "1h BC", color.green, 1)
+plot(hourly_pp, "1h PP", color.white, 1)
+
+plot(min5_tc, "5min TC", color.new(color.orange, 0), 2)
+plot(min5_bc, "5min BC", color.orange, 1)
+plot(min5_pp, "5min PP", color.white, 1)
+
+// ========================
+//  Alerts and Labels
+// ========================
+if barstate.isconfirmed and inSession
+    if bullish_alert
+        alert("🔵 BULLISH | 5min crossed above 1h TC + " + 
+              (close > daily_pp ? "Daily>PP " : "") + (close > weekly_pp ? "Weekly>PP " : "") +
+              " | RSI=" + str.tostring(rsi, "#.##") + (rsi>50?"✓":"✗") +
+              " | Vol=" + (volumeOK?"✓":"✗") +
+              " | Bullish Score: " + str.tostring(bullish_score, "#") + "%", 
+              alert.freq_once_per_bar_close)
+    if bearish_alert
+        alert("🔴 BEARISH | 5min crossed below 1h BC + " + 
+              (close < daily_pp ? "Daily<PP " : "") + (close < weekly_pp ? "Weekly<PP " : "") +
+              " | RSI=" + str.tostring(rsi, "#.##") + (rsi<50?"✓":"✗") +
+              " | Vol=" + (volumeOK?"✓":"✗") +
+              " | Bearish Score: " + str.tostring(bearish_score, "#") + "%", 
+              alert.freq_once_per_bar_close)
+
+// Chart label when alert triggers
+if barstate.isconfirmed and inSession and (bullish_alert or bearish_alert)
+    bullText = "BULLISH ALERT\n5min>1h TC\n+ " + (close > daily_tc ? "Daily>TC\n" : "") + (close > weekly_tc ? "Weekly>TC" : "") + "\nRSI: " + str.tostring(rsi, "#") + (rsi > 50 ? " ✓" : " ✗") + "  Vol: " + (volumeOK ? "✓" : "✗")
+    bearText = "BEARISH ALERT\n5min<1h BC\n+ " + (close < daily_bc ? "Daily<BC\n" : "") + (close < weekly_bc ? "Weekly<BC" : "") + "\nRSI: " + str.tostring(rsi, "#") + (rsi < 50 ? " ✓" : " ✗") + "  Vol: " + (volumeOK ? "✓" : "✗")
+    labelText = bullish_alert ? bullText : bearText
+    label.new(bar_index, high + (high - low) * 0.5, labelText,
+              color = bullish_alert ? color.new(color.green, 20) : color.new(color.red, 20),
+              textcolor = color.white, style = label.style_label_up, size = size.normal)
+
+// Optional: show current RSI and volume OK status on chart (uncomment if needed)
+// var table t = table.new(position.top_right, 2, 3, bgcolor=color.new(color.gray, 80))
+// if barstate.islast
+//     table.cell(t, 0, 0, "RSI", text_color=color.white)
+//     table.cell(t, 1, 0, str.tostring(rsi, "#.##"), text_color=rsi>50?color.green:color.red)
+//     table.cell(t, 0, 1, "Vol>Avg", text_color=color.white)
+//     table.cell(t, 1, 1, volumeOK?"✓":"✗", text_color=volumeOK?color.green:color.red)

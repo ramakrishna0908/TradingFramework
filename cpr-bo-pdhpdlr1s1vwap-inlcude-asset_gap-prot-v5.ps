@@ -1,0 +1,437 @@
+//@version=5
+indicator("CPR Breakout (Multi-Asset + Gap Override + Phase 1 Scoring)", overlay=true, max_labels_count=500)
+
+// ============================================================
+// INPUTS — Asset Class Preset
+// ============================================================
+grpAsset = "Asset Class Preset"
+assetMode = input.string("Stock", "Asset Class", options=["Stock", "Crypto", "Custom"], group=grpAsset, tooltip="Stock = US equity defaults | Crypto = 24/7 defaults | Custom = use manual inputs below")
+
+// ============================================================
+// INPUTS — Base filters
+// ============================================================
+grpBase = "Base filters"
+useVolume        = input.bool(true,  "Require volume >= MA * mult",                          group=grpBase)
+useRSI           = input.bool(true,  "Require RSI bias (>50 calls / <50 puts)",              group=grpBase)
+useVwap          = input.bool(true,  "Require VWAP alignment",                               group=grpBase)
+useAtrBuf        = input.bool(true,  "Require ATR buffer past level",                        group=grpBase)
+respectBias      = input.bool(true,  "Respect Opening Bias (stocks)",                        group=grpBase)
+useEma20         = input.bool(true,  "Require 20 EMA alignment + slope",                     group=grpBase)
+ema20Len         = input.int(20,     "EMA Length", minval=5, maxval=200,                     group=grpBase)
+useCprBreakEntry = input.bool(true,  "Include CPR (TC/BC) break as entry trigger",           group=grpBase)
+useWideCprBlock  = input.bool(true,  "Block signals on Wide CPR (>50%)",                     group=grpBase)
+narrowCprThresh  = input.float(15.0, "Narrow CPR threshold (% of D-range)", minval=1, maxval=50, group=grpBase)
+useNbarConfirm   = input.bool(true,  "Anti-fakeout: require N-bar confirmed break",          group=grpBase)
+nBarConfirm      = input.int(2,      "N bars to confirm (Custom mode)", minval=1, maxval=5,  group=grpBase)
+useGapOverride   = input.bool(true,  "Gap override: ignore HTF bias on strong overnight gap", group=grpBase)
+gapThresholdPct  = input.float(2.0,  "Gap threshold % (Custom mode)", minval=0.5, maxval=10.0, step=0.5, group=grpBase)
+
+// ============================================================
+// INPUTS — Bias Filters
+// ============================================================
+useHTFBias = input.bool(true, "Use Higher-Timeframe Bias (1H)", group="Bias Filters")
+
+// ============================================================
+// INPUTS — Params
+// ============================================================
+sessionInput       = input.session("0930-1600", "Regular Session (Custom mode)")
+volLen             = input.int(20,    "Volume MA Length", minval=1)
+volMult            = input.float(1.1, "Volume Multiplier", minval=0.1, step=0.1)
+rsiLen             = input.int(14,    "RSI Length", minval=2)
+atrBufMult         = input.float(0.10,"ATR Buffer = mult * daily ATR(14)", minval=0.0, maxval=1.0, step=0.05)
+oneSignalPerDirDay = input.bool(true, "One Signal Per Direction Per Day")
+
+// ============================================================
+// INPUTS — Debug
+// ============================================================
+debugMode          = input.bool(true,  "Debug Mode")
+allowOutOfSession  = input.bool(true,  "DEBUG: Allow signals outside session (Custom mode)")
+ignoreVolumeGate   = input.bool(false, "DEBUG: Ignore volume gate")
+ignoreBiasGate     = input.bool(true,  "DEBUG: Ignore bias gate")
+ignoreDailyLimit   = input.bool(true,  "DEBUG: Ignore one-signal-per-day")
+showValuesLabel    = input.bool(true,  "Show Dashboard")
+showLevelPlots     = input.bool(true,  "Plot Levels")
+
+// ============================================================
+// INPUTS — Pine Screener
+// ============================================================
+grpScr              = "Pine Screener"
+emitScreenerColumns = input.bool(true, "Emit Screener Columns", group=grpScr)
+recencyBars         = input.int(10,    "Bars to keep 'recent' signal active", minval=1, maxval=200, group=grpScr)
+
+// ============================================================
+// INPUTS — Options Alert Format
+// ============================================================
+grpOpt = "Options Alert Format"
+useOptionAlert  = input.bool(true,             "Send Options-Format Discord Alert",   group=grpOpt)
+botName         = input.string("@bot",         "Bot Tag",                             group=grpOpt)
+optAction       = input.string("BOUGHT",       "Action Verb", options=["BOUGHT", "BUY", "ENTER", "LONG"], group=grpOpt)
+strikeRound     = input.float(1.0,             "Strike Rounding ($ increment)", options=[0.5, 1.0, 2.5, 5.0, 10.0], group=grpOpt)
+strikeOffset    = input.int(0,                 "Strike Offset ($ above price; 0=ATM)", group=grpOpt)
+dteDays         = input.int(2,                 "Days to Expiration", minval=0, maxval=60, group=grpOpt)
+premiumEstPct   = input.float(0.5,             "Premium estimate (% of strike)", minval=0.05, maxval=5.0, step=0.05, group=grpOpt)
+
+// ============================================================
+// INPUTS — Scoring (Phase 1 — observation only)
+// ============================================================
+grpScore = "Scoring (Phase 1 — observation)"
+wVol        = input.int(1, "Weight: Volume",     minval=0, maxval=5, group=grpScore)
+wVwap       = input.int(1, "Weight: VWAP",       minval=0, maxval=5, group=grpScore)
+wRsi        = input.int(1, "Weight: RSI",        minval=0, maxval=5, group=grpScore)
+wEma        = input.int(2, "Weight: EMA",        minval=0, maxval=5, group=grpScore, tooltip="Higher weight — trend direction")
+wHtf        = input.int(2, "Weight: HTF bias",   minval=0, maxval=5, group=grpScore, tooltip="Higher weight — higher-TF trend")
+wCprNarrow  = input.int(1, "Weight: CPR narrow", minval=0, maxval=5, group=grpScore, tooltip="Points only when CPR is narrow (HIGH quality)")
+
+// ============================================================
+// Resolve effective values from Asset Class preset
+// ============================================================
+effSession = assetMode == "Crypto" ? "0000-2400:1234567" : assetMode == "Stock" ? "0930-1600:23456" : sessionInput
+effAllowOutSess    = assetMode == "Crypto" ? true        : assetMode == "Stock" ? false       : allowOutOfSession
+effRespectBias     = assetMode == "Crypto" ? false       : assetMode == "Stock" ? true        : respectBias
+effNBarConfirm     = assetMode == "Crypto" ? 2           : assetMode == "Stock" ? 1           : nBarConfirm
+effNarrowCprThresh = assetMode == "Crypto" ? 10.0        : assetMode == "Stock" ? 15.0        : narrowCprThresh
+effVolMult         = assetMode == "Crypto" ? 1.3         : assetMode == "Stock" ? 1.1         : volMult
+effGapOverride     = assetMode == "Crypto" ? false       : assetMode == "Stock" ? true        : useGapOverride
+effGapThreshold    = assetMode == "Crypto" ? 3.0         : assetMode == "Stock" ? 2.0         : gapThresholdPct
+
+eUseVolume = useVolume
+eUseRSI    = useRSI
+eUseBias   = effRespectBias
+eUseVwap   = useVwap
+eUseAtrBuf = useAtrBuf
+
+// ============================================================
+// Session state
+// ============================================================
+inSession     = not na(time(timeframe.period, effSession))
+newSessionBar = inSession and not inSession[1]
+
+// ============================================================
+// Previous-day levels + CPR + R1/S1 + extended pivots
+// ============================================================
+pdh = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_on)
+pdc = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+
+pivot = (pdh + pdl + pdc) / 3.0
+bcRaw = (pdh + pdl) / 2.0
+tcRaw = 2.0 * pivot - bcRaw
+tc = math.max(tcRaw, bcRaw)
+bc = math.min(tcRaw, bcRaw)
+r1 = 2.0 * pivot - pdl
+s1 = 2.0 * pivot - pdh
+
+r2 = pivot + (pdh - pdl)
+r3 = pdh + 2 * (pivot - pdl)
+s2 = pivot - (pdh - pdl)
+s3 = pdl - 2 * (pdh - pivot)
+
+dAtr = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead=barmerge.lookahead_on)
+
+vwapVal      = ta.vwap(hlc3)
+rsiVal       = ta.rsi(close, rsiLen)
+ema20        = ta.ema(close, ema20Len)
+ema20Rising  = ema20 > ema20[1]
+ema20Falling = ema20 < ema20[1]
+
+buf = eUseAtrBuf and not na(dAtr) ? dAtr * atrBufMult : 0.0
+
+// ============================================================
+// CPR width quality
+// ============================================================
+cprRange    = pdh - pdl
+cprWidth    = tc - bc
+cprWidthPct = cprRange != 0 ? (cprWidth / cprRange) * 100.0 : 0.0
+cprQuality  = cprWidthPct < effNarrowCprThresh ? "HIGH" : cprWidthPct > 50.0 ? "LOW" : "MED"
+cprDesc     = cprQuality == "HIGH" ? "Narrow CPR" : cprQuality == "LOW" ? "Wide CPR" : "Normal CPR"
+cprNarrow   = cprQuality == "HIGH"
+
+// ============================================================
+// Break helpers
+// ============================================================
+brokeAbove(level, b) =>
+    close > level + b and close[1] <= level + b
+
+brokeBelow(level, b) =>
+    close < level - b and close[1] >= level - b
+
+// ============================================================
+// Volume gate
+// ============================================================
+volMA    = ta.sma(volume, volLen)
+volOkRaw = volume >= volMA * effVolMult
+volOk    = ignoreVolumeGate ? true : (eUseVolume ? volOkRaw : true)
+
+isWeekday = dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+sessionOk = effAllowOutSess ? true : (inSession and (assetMode == "Crypto" or isWeekday))
+// ============================================================
+// Bias state machine + session open capture
+// ============================================================
+var string openingBias    = "UNSET"
+var string activeBias     = "UNSET"
+var bool   callFiredToday = false
+var bool   putFiredToday  = false
+var float  sessionOpenPx  = na
+
+if newSessionBar
+    openingBias    := open > tc ? "BULLISH" : open < bc ? "BEARISH" : "RANGE"
+    activeBias     := openingBias
+    callFiredToday := false
+    putFiredToday  := false
+    sessionOpenPx  := open
+
+if sessionOk and activeBias == "RANGE"
+    if close > tc
+        activeBias := "BULLISH"
+    else if close < bc
+        activeBias := "BEARISH"
+
+// ============================================================
+// Gap detection (session open vs previous close)
+// ============================================================
+gapPct        = not na(sessionOpenPx) and not na(pdc) and pdc != 0 ? ((sessionOpenPx - pdc) / pdc) * 100.0 : 0.0
+gapDownStrong = effGapOverride and gapPct < -effGapThreshold
+gapUpStrong   = effGapOverride and gapPct >  effGapThreshold
+
+// ============================================================
+// Multi-Timeframe Bias Module (with gap override)
+// ============================================================
+h1_bias = request.security(syminfo.tickerid, "60", activeBias, lookahead=barmerge.lookahead_off)
+h1Bull  = h1_bias == "BULLISH"
+h1Bear  = h1_bias == "BEARISH"
+
+htfAllowsCallBase = not useHTFBias or h1Bull
+htfAllowsPutBase  = not useHTFBias or h1Bear
+htfAllowsCall     = htfAllowsCallBase or gapUpStrong
+htfAllowsPut      = htfAllowsPutBase  or gapDownStrong
+
+// ============================================================
+// Cross detectors
+// ============================================================
+crossPDH = brokeAbove(pdh, buf)
+crossR1  = brokeAbove(r1,  buf)
+crossTC  = brokeAbove(tc,  buf)
+crossPDL = brokeBelow(pdl, buf)
+crossS1  = brokeBelow(s1,  buf)
+crossBC  = brokeBelow(bc,  buf)
+
+bullCrossNow = crossPDH or crossR1 or (useCprBreakEntry and crossTC)
+bearCrossNow = crossPDL or crossS1 or (useCprBreakEntry and crossBC)
+
+// ============================================================
+// N-bar confirmation
+// ============================================================
+var int bullStreak = 0
+var int bearStreak = 0
+bullStreak := close > tc + buf ? bullStreak + 1 : 0
+bearStreak := close < bc - buf ? bearStreak + 1 : 0
+
+sustainedBull = bullStreak == effNBarConfirm
+sustainedBear = bearStreak == effNBarConfirm
+
+bullBreakRaw = (useNbarConfirm ? sustainedBull : bullCrossNow) and barstate.isconfirmed
+bearBreakRaw = (useNbarConfirm ? sustainedBear : bearCrossNow) and barstate.isconfirmed
+
+// ============================================================
+// Gates
+// ============================================================
+biasAllowsCall = ignoreBiasGate ? true : (eUseBias ? activeBias == "BULLISH" : true)
+biasAllowsPut  = ignoreBiasGate ? true : (eUseBias ? activeBias == "BEARISH" : true)
+
+vwapAllowsCall = not eUseVwap or (not na(vwapVal) and close > vwapVal)
+vwapAllowsPut  = not eUseVwap or (not na(vwapVal) and close < vwapVal)
+
+rsiAllowsCall  = not eUseRSI or (not na(rsiVal) and rsiVal > 50)
+rsiAllowsPut   = not eUseRSI or (not na(rsiVal) and rsiVal < 50)
+
+emaAllowsCall  = not useEma20 or (close > ema20 and ema20Rising)
+emaAllowsPut   = not useEma20 or (close < ema20 and ema20Falling)
+
+cprQualOK      = not useWideCprBlock or cprWidthPct <= 50.0
+
+dailyCallOk    = ignoreDailyLimit ? true : (oneSignalPerDirDay ? not callFiredToday : true)
+dailyPutOk     = ignoreDailyLimit ? true : (oneSignalPerDirDay ? not putFiredToday  : true)
+
+allowCall = htfAllowsCall and rsiAllowsCall and vwapAllowsCall and biasAllowsCall and emaAllowsCall and cprQualOK
+allowPut  = htfAllowsPut  and rsiAllowsPut  and vwapAllowsPut  and biasAllowsPut  and emaAllowsPut  and cprQualOK
+
+// ============================================================
+// Final signals (still uses AND-gate logic — Phase 1 does NOT change firing)
+// ============================================================
+callSignal = sessionOk and volOk and bullBreakRaw and allowCall and dailyCallOk
+putSignal  = sessionOk and volOk and bearBreakRaw and allowPut  and dailyPutOk
+
+if callSignal
+    callFiredToday := true
+if putSignal
+    putFiredToday  := true
+
+// ============================================================
+// Score calculation (Phase 1 — observation only)
+// ============================================================
+scoreMax  = wVol + wVwap + wRsi + wEma + wHtf + wCprNarrow
+
+callScore = (volOk          ? wVol       : 0) + (vwapAllowsCall ? wVwap : 0) + (rsiAllowsCall ? wRsi : 0) + (emaAllowsCall ? wEma : 0) + (htfAllowsCall ? wHtf : 0) + (cprNarrow ? wCprNarrow : 0)
+putScore  = (volOk          ? wVol       : 0) + (vwapAllowsPut  ? wVwap : 0) + (rsiAllowsPut  ? wRsi : 0) + (emaAllowsPut  ? wEma : 0) + (htfAllowsPut  ? wHtf : 0) + (cprNarrow ? wCprNarrow : 0)
+
+callTier = callScore >= 7 ? "A+" : callScore >= 5 ? "A " : callScore >= 4 ? "B " : callScore >= 3 ? "C " : "D "
+putTier  = putScore  >= 7 ? "A+" : putScore  >= 5 ? "A " : putScore  >= 4 ? "B " : putScore  >= 3 ? "C " : "D "
+
+// ============================================================
+// Screener encodings & recency
+// ============================================================
+biasToNum(b) =>
+    b == "BULLISH" ? 1.0 : b == "BEARISH" ? -1.0 : b == "RANGE" ? 0.0 : na
+
+activeBiasNum = biasToNum(activeBias)
+h1BiasNum     = biasToNum(h1_bias)
+openBiasNum   = biasToNum(openingBias)
+signalScore   = callSignal ? 1 : putSignal ? -1 : 0
+
+var int barsSinceCallFire = na
+var int barsSincePutFire  = na
+if callSignal
+    barsSinceCallFire := 0
+else if not na(barsSinceCallFire)
+    barsSinceCallFire := barsSinceCallFire + 1
+if putSignal
+    barsSincePutFire := 0
+else if not na(barsSincePutFire)
+    barsSincePutFire := barsSincePutFire + 1
+
+recentCall = not na(barsSinceCallFire) and barsSinceCallFire <= recencyBars
+recentPut  = not na(barsSincePutFire)  and barsSincePutFire  <= recencyBars
+
+vwapDeltaPct = not na(vwapVal) and vwapVal != 0 ? (close - vwapVal) / vwapVal * 100.0 : na
+distPDHPct   = not na(pdh)     and pdh != 0     ? (close - pdh)     / pdh     * 100.0 : na
+distPDLPct   = not na(pdl)     and pdl != 0     ? (close - pdl)     / pdl     * 100.0 : na
+distR1Pct    = not na(r1)      and r1  != 0     ? (close - r1)      / r1      * 100.0 : na
+distS1Pct    = not na(s1)      and s1  != 0     ? (close - s1)      / s1      * 100.0 : na
+volRatio     = not na(volMA)   and volMA != 0   ? volume / volMA                     : na
+
+// ============================================================
+// Plots — levels, VWAP, EMA
+// ============================================================
+plot(showLevelPlots ? pdh     : na, title="PDH",    color=color.new(color.green,   0), linewidth=1)
+plot(showLevelPlots ? pdl     : na, title="PDL",    color=color.new(color.red,     0), linewidth=1)
+plot(showLevelPlots ? tc      : na, title="TC",     color=color.new(color.orange,  0), linewidth=1)
+plot(showLevelPlots ? bc      : na, title="BC",     color=color.new(color.orange,  0), linewidth=1)
+plot(showLevelPlots ? r1      : na, title="R1",     color=color.new(color.lime,   20), linewidth=1)
+plot(showLevelPlots ? s1      : na, title="S1",     color=color.new(color.maroon, 20), linewidth=1)
+plot(showLevelPlots ? vwapVal : na, title="VWAP",   color=color.new(color.blue,    0), linewidth=2)
+plot(showLevelPlots ? ema20   : na, title="20 EMA", color=color.new(color.purple,  0), linewidth=2)
+
+plotshape(callSignal, title="CALL Final", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="CALL")
+plotshape(putSignal,  title="PUT Final",  style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   0), size=size.small, text="PUT")
+
+// ============================================================
+// Pine Screener columns
+// ============================================================
+plot(emitScreenerColumns ? signalScore        : na, title="Signal (+1 Call / -1 Put)", color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns and recentCall ? 1 : 0,    title="Recent CALL (1/0)",         color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns and recentPut  ? 1 : 0,    title="Recent PUT (1/0)",          color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? barsSinceCallFire  : na, title="Bars Since CALL",           color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? barsSincePutFire   : na, title="Bars Since PUT",            color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? h1BiasNum          : na, title="HTF 1H Bias (+1/-1/0)",     color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? activeBiasNum      : na, title="Active Bias (+1/-1/0)",     color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? openBiasNum        : na, title="Opening Bias (+1/-1/0)",    color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? rsiVal             : na, title="RSI",                       color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? vwapDeltaPct       : na, title="VWAP Delta %",              color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? volRatio           : na, title="Volume Ratio (vol/MA)",     color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? distPDHPct         : na, title="Dist to PDH %",             color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? distPDLPct         : na, title="Dist to PDL %",             color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? distR1Pct          : na, title="Dist to R1 %",              color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? distS1Pct          : na, title="Dist to S1 %",              color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? cprWidthPct        : na, title="CPR Width %",               color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? gapPct             : na, title="Gap %",                     color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? callScore          : na, title="Call Score",                color=color.new(color.white, 100), display=display.data_window)
+plot(emitScreenerColumns ? putScore           : na, title="Put Score",                 color=color.new(color.white, 100), display=display.data_window)
+
+// ============================================================
+// Gate Status Dashboard — HORIZONTAL (bottom-right)
+// ============================================================
+var table dash = table.new(position.bottom_right, 3, 2, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 50), frame_width=1, frame_color=color.new(color.gray, 30))
+
+ck(bool b) => b ? "✅" : "❌"
+
+if showValuesLabel and barstate.islast
+    vwapDelta = not na(vwapVal) and vwapVal != 0 ? (close - vwapVal) / vwapVal * 100.0 : 0.0
+
+    bullStreakTxt = bullStreak == 0 ? "0 (waiting)" : bullStreak <  effNBarConfirm ? str.tostring(bullStreak) + "/" + str.tostring(effNBarConfirm) + " building" : bullStreak == effNBarConfirm ? "✅ CONFIRMED" : "✅ sustained " + str.tostring(bullStreak) + " bars"
+    bearStreakTxt = bearStreak == 0 ? "0 (waiting)" : bearStreak <  effNBarConfirm ? str.tostring(bearStreak) + "/" + str.tostring(effNBarConfirm) + " building" : bearStreak == effNBarConfirm ? "✅ CONFIRMED" : "✅ sustained " + str.tostring(bearStreak) + " bars"
+
+    gapTag = gapDownStrong ? " 📉 HTF override" : gapUpStrong ? " 📈 HTF override" : ""
+
+    timingTxt = "▶ TIMING — allowed? [" + assetMode + "]\n" + "──────────────────\n" + "sessionOk     " + ck(sessionOk) + "\n" + "dailyCallOk   " + ck(dailyCallOk) + "\n" + "dailyPutOk    " + ck(dailyPutOk)
+
+    triggerTxt = "▶ TRIGGER — break?\n" + "──────────────────\n" + "crossPDH      " + ck(crossPDH) + "\n" + "crossR1       " + ck(crossR1) + "\n" + "crossTC       " + ck(crossTC) + "\n" + "crossPDL      " + ck(crossPDL) + "\n" + "crossS1       " + ck(crossS1) + "\n" + "crossBC       " + ck(crossBC) + "\n" + "Bull streak   " + bullStreakTxt + "\n" + "Bear streak   " + bearStreakTxt + "\n" + "BULL break    " + ck(bullBreakRaw) + "\n" + "BEAR break    " + ck(bearBreakRaw)
+
+    confirmTxt = "▶ CONFIRMATION — context?\n" + "─────────────────────────\n" + "volOk         " + ck(volOk) + "\n" + "RSI " + str.tostring(rsiVal, "#.#") + "      call " + ck(rsiAllowsCall) + "  put " + ck(rsiAllowsPut) + "\n" + "VWAP " + (vwapDelta >= 0 ? "+" : "") + str.tostring(vwapDelta, "#.##") + "%   call " + ck(vwapAllowsCall) + "  put " + ck(vwapAllowsPut) + "\n" + "HTF " + h1_bias + "   call " + ck(htfAllowsCall) + "  put " + ck(htfAllowsPut) + "\n" + "EMA " + (close > ema20 ? "↑ " : "↓ ") + str.tostring(ema20, "#.##") + "   call " + ck(emaAllowsCall) + "  put " + ck(emaAllowsPut) + "\n" + "CPR " + cprQuality + " (" + str.tostring(cprWidthPct, "#.#") + "% width)\n" + "Gap " + (gapPct >= 0 ? "+" : "") + str.tostring(gapPct, "#.##") + "%" + gapTag + "\n" + "Opening: " + openingBias + "\n" + "Active:  " + activeBias + "\n" + "ATR buf: " + str.tostring(buf, "#.##") + "\n" + "─────────────────────────\n" + "SCORE call " + str.tostring(callScore) + "/" + str.tostring(scoreMax) + "  [" + callTier + "]\n" + "SCORE put  " + str.tostring(putScore) + "/" + str.tostring(scoreMax) + "  [" + putTier + "]"
+
+    table.cell(dash, 0, 0, timingTxt,  text_color=color.new(color.white, 0), bgcolor=color.new(color.blue,   80), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, triggerTxt, text_color=color.new(color.white, 0), bgcolor=color.new(color.orange, 80), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 2, 0, confirmTxt, text_color=color.new(color.white, 0), bgcolor=color.new(color.purple, 80), text_size=size.small, text_halign=text.align_left)
+
+    callBg = callSignal ? color.new(color.green, 20) : color.new(color.gray, 70)
+    putBg  = putSignal  ? color.new(color.red,   20) : color.new(color.gray, 70)
+    midBg  = (callSignal or putSignal) ? color.new(color.yellow, 50) : color.new(color.gray, 80)
+
+    callCellTxt = callSignal ? "🎯 CALL → 🔵 FIRE!  " + str.tostring(callScore) + "/" + str.tostring(scoreMax) + " " + callTier : "🎯 CALL → —  " + str.tostring(callScore) + "/" + str.tostring(scoreMax) + " " + callTier
+    putCellTxt  = putSignal  ? "🎯 PUT → 🔴 FIRE!  "  + str.tostring(putScore)  + "/" + str.tostring(scoreMax) + " " + putTier  : "🎯 PUT → —  "  + str.tostring(putScore)  + "/" + str.tostring(scoreMax) + " " + putTier
+    midCellTxt  = (callSignal or putSignal) ? "⚡ SIGNAL ⚡" : "⏳ Waiting..."
+
+    table.cell(dash, 0, 1, callCellTxt, text_color=color.white, bgcolor=callBg, text_size=size.small, text_halign=text.align_center)
+    table.cell(dash, 1, 1, midCellTxt,  text_color=color.white, bgcolor=midBg,  text_size=size.small, text_halign=text.align_center)
+    table.cell(dash, 2, 1, putCellTxt,  text_color=color.white, bgcolor=putBg,  text_size=size.small, text_halign=text.align_center)
+
+// ============================================================
+// Alert conditions
+// ============================================================
+alertcondition(callSignal, "CALL_SIGNAL_DEBUG", "CALL_SIGNAL_DEBUG")
+alertcondition(putSignal,  "PUT_SIGNAL_DEBUG",  "PUT_SIGNAL_DEBUG")
+
+// ============================================================
+// Options-Format Discord Alerts
+// ============================================================
+f_monthName(int m) =>
+    m == 1 ? "JAN" : m == 2 ? "FEB" : m == 3 ? "MAR" : m == 4 ? "APR" : m == 5 ? "MAY" : m == 6 ? "JUN" : m == 7 ? "JUL" : m == 8 ? "AUG" : m == 9 ? "SEP" : m == 10 ? "OCT" : m == 11 ? "NOV" : "DEC"
+
+expTimeRaw = time + dteDays * 86400000
+expDow     = dayofweek(expTimeRaw)
+// Push Saturday/Sunday expirations forward to Monday (no weekend option expirations)
+expTime    = expDow == dayofweek.saturday ? expTimeRaw + 2 * 86400000 : expDow == dayofweek.sunday ? expTimeRaw + 1 * 86400000 : expTimeRaw
+expMonth   = f_monthName(month(expTime))
+expDay     = dayofmonth(expTime)
+
+f_optMsg(bool isCall) =>
+    strikeBase = isCall ? close + strikeOffset : close - strikeOffset
+    strike     = math.round(strikeBase / strikeRound) * strikeRound
+    optLetter  = isCall ? "C" : "P"
+
+    trigLevel = isCall ? (close > r1 ? r1 : close > pdh ? pdh : tc) : (close < s1 ? s1 : close < pdl ? pdl : bc)
+    trigName  = isCall ? (close > r1 ? "R1" : close > pdh ? "PDH" : "TC") : (close < s1 ? "S1" : close < pdl ? "PDL" : "BC")
+
+    t1     = isCall ? r2 : s2
+    t2     = isCall ? r3 : s3
+    t1Name = isCall ? "R2" : "S2"
+    t2Name = isCall ? "R3" : "S3"
+
+    stopLevel = isCall ? tc : bc
+    stopLabel = isCall ? "Below TC" : "Above BC"
+
+    premiumEst = strike * premiumEstPct / 100.0
+    volTag     = volOk ? " with volume" : ""
+    confTag    = useNbarConfirm ? " (" + str.tostring(effNBarConfirm) + "-bar confirmed)" : ""
+    gapTag2    = (isCall and gapUpStrong) or (not isCall and gapDownStrong) ? "\\n📰 Gap " + (gapPct >= 0 ? "+" : "") + str.tostring(gapPct, "#.##") + "% (HTF override)" : ""
+    scoreNow   = isCall ? callScore : putScore
+    tierNow    = isCall ? callTier  : putTier
+
+    msg = botName + " " + optAction + " | " + syminfo.ticker + " " + expMonth + " " + str.tostring(expDay) + " " + str.tostring(strike, "#.##") + optLetter + " $" + str.tostring(premiumEst, "#.##") + "\\n📊 Signal: " + cprDesc + " + " + trigName + " Break  [" + cprQuality + " conf]" + confTag + "\\n🏆 Score: " + str.tostring(scoreNow) + "/" + str.tostring(scoreMax) + "  [" + tierNow + "]" + "\\n📈 Trigger: $" + str.tostring(trigLevel, "#.##") + " (" + trigName + ") broken" + volTag + gapTag2 + "\\n🎯 Targets: " + t1Name + " $" + str.tostring(t1, "#.##") + " → " + t2Name + " $" + str.tostring(t2, "#.##") + "\\n🛑 Stop: " + stopLabel + " $" + str.tostring(stopLevel, "#.##") 
+
+    "{\"content\":\"" + msg + "\"}"
+
+if useOptionAlert and callSignal
+    alert(f_optMsg(true), alert.freq_once_per_bar_close)
+
+if useOptionAlert and putSignal
+    alert(f_optMsg(false), alert.freq_once_per_bar_close)
