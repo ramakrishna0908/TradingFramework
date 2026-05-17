@@ -1,0 +1,410 @@
+//@version=5
+indicator("Casey Cheat Sheet - Profilable Breakout Alerts", overlay=true, max_labels_count=500)
+
+// ============================================================
+// INPUTS
+// ============================================================
+grp_ema = "EMAs"
+ema_fast = input.int(13,  "Fast EMA", group=grp_ema)
+ema_mid  = input.int(48,  "Mid EMA",  group=grp_ema)
+ema_slow = input.int(200, "Slow EMA", group=grp_ema)
+
+grp_flag = "Flag Detection"
+flag_lookback     = input.int(20,    "Flag Lookback Bars",                  minval=5,  group=grp_flag)
+impulse_lookback  = input.int(30,    "Impulse Lookback Bars",               minval=10, group=grp_flag)
+impulse_pct       = input.float(0.5, "Min Impulse Move %",                  minval=0.1, step=0.1, group=grp_flag)
+pullback_max_pct  = input.float(0.5, "Max Pullback Depth (of impulse)",     minval=0.2, maxval=0.8, step=0.05, group=grp_flag)
+
+grp_htf = "Higher Timeframe Gate"
+use_htf_gate = input.bool(true,    "Require 1H Bias Alignment",                       group=grp_htf)
+htf_tf       = input.timeframe("60","Higher Timeframe",                                group=grp_htf)
+htf_strict   = input.bool(false,   "Strict 1H (require price > 13 EMA on 1H too)",    group=grp_htf)
+
+grp_loc = "Location"
+strict_location = input.bool(true, "Strict Location: Require Both PDH+PMH / PDL+PML", group=grp_loc, tooltip="ON: needs above PDH AND PMH (bull) / below PDL AND PML (bear). OFF: any one is enough.")
+
+grp_vol = "Volume Confirmation"
+use_volume = input.bool(true,  "Require Volume Confirmation", group=grp_vol)
+vol_len    = input.int(20,     "Volume MA Length", minval=1,  group=grp_vol)
+vol_mult   = input.float(1.0,  "Volume Multiplier", minval=0.1, step=0.1, group=grp_vol)
+
+grp_rr = "Risk / Reward"
+use_rr_filter = input.bool(true,  "Require Minimum R:R",                  group=grp_rr)
+min_rr        = input.float(1.5,  "Minimum R:R", minval=0.5, step=0.25,   group=grp_rr)
+target_rr     = input.float(2.0,  "Target R Multiple", minval=0.5, step=0.25, group=grp_rr)
+max_risk_pct  = input.float(1.0,  "Max Risk % From Entry", minval=0.1, step=0.1, group=grp_rr)
+
+grp_score = "Scoring & Quality"
+min_score = input.int(7, "Minimum Alert Score", minval=1, maxval=10, group=grp_score)
+
+grp_opt = "Options Alert Format (Discord)"
+use_options_format = input.bool(true,             "Send Options-Format Discord Alert",  group=grp_opt, tooltip="Discord-wrapped {\"content\":\"...\"} payload with option contract details")
+bot_name           = input.string("@bot",         "Bot Tag",                            group=grp_opt)
+action_verb        = input.string("BOUGHT",       "Action Verb", options=["BOUGHT", "BUY", "ENTER", "LONG"], group=grp_opt)
+strike_round       = input.float(1.0,             "Strike Rounding ($ increment)", options=[0.5, 1.0, 2.5, 5.0, 10.0], group=grp_opt)
+strike_offset      = input.int(0,                 "Strike Offset ($ above price; 0=ATM)", group=grp_opt)
+dte_days           = input.int(2,                 "Days to Expiration", minval=0, maxval=60, group=grp_opt)
+premium_est_pct    = input.float(0.5,             "Premium estimate (% of strike)", minval=0.05, maxval=5.0, step=0.05, group=grp_opt)
+
+grp_tbl = "Display"
+show_tbl          = input.bool(true,  "Show Checklist Table", group=grp_tbl)
+tbl_pos           = input.string("top_right", "Table Position",
+     options=["top_right","top_left","bottom_right","bottom_left","middle_right"], group=grp_tbl)
+show_levels       = input.bool(true,  "Show PDH/PDL/PMH/PML Lines", group=grp_tbl)
+show_trade_levels = input.bool(true,  "Show Trade Levels", group=grp_tbl)
+trade_level_bars  = input.int(20,     "Bars To Show Trade Levels", minval=1, group=grp_tbl)
+show_debug_panel  = input.bool(true,  "Show TIMING/TRIGGER/CONFIRMATION Debug Panel", group=grp_tbl)
+debug_pos         = input.string("bottom_right", "Debug Panel Position", options=["top_right","top_left","bottom_right","bottom_left","middle_right"], group=grp_tbl)
+
+// ============================================================
+// EMAs (current TF)
+// ============================================================
+e13  = ta.ema(close, ema_fast)
+e48  = ta.ema(close, ema_mid)
+e200 = ta.ema(close, ema_slow)
+
+plot(e13,  "13 EMA",  color=color.yellow, linewidth=2)
+plot(e48,  "48 EMA",  color=color.purple, linewidth=2)
+plot(e200, "200 EMA", color=color.red,    linewidth=2)
+
+// ============================================================
+// 1H BIAS GATE
+// ============================================================
+htf_e13   = request.security(syminfo.tickerid, htf_tf, ta.ema(close, ema_fast), lookahead=barmerge.lookahead_off)
+htf_e48   = request.security(syminfo.tickerid, htf_tf, ta.ema(close, ema_mid),  lookahead=barmerge.lookahead_off)
+htf_e200  = request.security(syminfo.tickerid, htf_tf, ta.ema(close, ema_slow), lookahead=barmerge.lookahead_off)
+htf_close = request.security(syminfo.tickerid, htf_tf, close,                   lookahead=barmerge.lookahead_off)
+
+htf_bull = htf_strict ? (htf_e13 > htf_e48 and htf_e48 > htf_e200 and htf_close > htf_e13) : (htf_e13 > htf_e48 and htf_e48 > htf_e200)
+htf_bear = htf_strict ? (htf_e13 < htf_e48 and htf_e48 < htf_e200 and htf_close < htf_e13) : (htf_e13 < htf_e48 and htf_e48 < htf_e200)
+
+htf_ok_bull = use_htf_gate ? htf_bull : true
+htf_ok_bear = use_htf_gate ? htf_bear : true
+
+// ============================================================
+// PDH / PDL
+// ============================================================
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+
+// ============================================================
+// PMH / PML (04:00 - 09:30 ET)
+// ============================================================
+is_premkt = not na(time(timeframe.period, "0400-0930", "America/New_York"))
+var float pmh = na
+var float pml = na
+new_session = ta.change(time("D")) != 0
+if new_session
+    pmh := na
+    pml := na
+if is_premkt
+    pmh := na(pmh) ? high : math.max(pmh, high)
+    pml := na(pml) ? low  : math.min(pml, low)
+
+plot(show_levels ? pdh : na, "PDH", color=color.new(color.lime,   0), style=plot.style_linebr, linewidth=1)
+plot(show_levels ? pdl : na, "PDL", color=color.new(color.red,    0), style=plot.style_linebr, linewidth=1)
+plot(show_levels ? pmh : na, "PMH", color=color.new(color.aqua,   0), style=plot.style_linebr, linewidth=1)
+plot(show_levels ? pml : na, "PML", color=color.new(color.orange, 0), style=plot.style_linebr, linewidth=1)
+
+// ============================================================
+// VOLUME CONFIRMATION
+// ============================================================
+vol_ma    = ta.sma(volume, vol_len)
+volume_ok = not use_volume or volume >= vol_ma * vol_mult
+
+// ============================================================
+// LOCATION (strict vs relaxed)
+// ============================================================
+above_pdh_pmh = strict_location ? (not na(pdh) and not na(pmh) and close > pdh and close > pmh) : ((not na(pdh) and close > pdh) or (not na(pmh) and close > pmh))
+below_pdl_pml = strict_location ? (not na(pdl) and not na(pml) and close < pdl and close < pml) : ((not na(pdl) and close < pdl) or (not na(pml) and close < pml))
+
+// ============================================================
+// EMA STACK
+// ============================================================
+bullish_ema = e13 > e48 and e48 > e200 and close > e13
+bearish_ema = e13 < e48 and e48 < e200 and close < e13
+
+// ============================================================
+// FLAG DETECTION (markdown artifacts fixed: _ and \* -> *)
+// ============================================================
+impulse_low      = ta.lowest(low,  impulse_lookback)
+impulse_high     = ta.highest(high, impulse_lookback)
+impulse_up_pct   = (impulse_high - impulse_low) / impulse_low  * 100
+impulse_down_pct = (impulse_high - impulse_low) / impulse_high * 100
+
+recent_high = ta.highest(high, flag_lookback)
+recent_low  = ta.lowest(low,   flag_lookback)
+
+bull_flag = impulse_up_pct >= impulse_pct and close > e13 and recent_low > impulse_low and (recent_high - recent_low) < (impulse_high - impulse_low) * pullback_max_pct and ta.lowest(low, flag_lookback) > e48
+
+bear_flag = impulse_down_pct >= impulse_pct and close < e13 and recent_high < impulse_high and (recent_high - recent_low) < (impulse_high - impulse_low) * pullback_max_pct and ta.highest(high, flag_lookback) < e48
+
+// ============================================================
+// FLAG BREAKOUT TRIGGERS (alert only on actual break)
+// ============================================================
+flag_high = ta.highest(high, flag_lookback)
+flag_low  = ta.lowest(low,   flag_lookback)
+
+bull_trigger = bull_flag and close > flag_high[1]
+bear_trigger = bear_flag and close < flag_low[1]
+
+// ============================================================
+// RISK / REWARD MODEL
+// Bull: entry=close, stop=flag_low, target=entry+risk*target_rr
+// Bear: entry=close, stop=flag_high, target=entry-risk*target_rr
+// ============================================================
+bull_entry    = close
+bull_stop     = flag_low
+bull_risk     = bull_entry - bull_stop
+bull_target   = bull_entry + bull_risk * target_rr
+bull_risk_pct = bull_risk / bull_entry * 100
+bull_rr_ok    = bull_risk > 0 and bull_risk_pct <= max_risk_pct and (bull_risk * target_rr) / bull_risk >= min_rr
+
+bear_entry    = close
+bear_stop     = flag_high
+bear_risk     = bear_stop - bear_entry
+bear_target   = bear_entry - bear_risk * target_rr
+bear_risk_pct = bear_risk / bear_entry * 100
+bear_rr_ok    = bear_risk > 0 and bear_risk_pct <= max_risk_pct and (bear_risk * target_rr) / bear_risk >= min_rr
+
+// ============================================================
+// SCORING (weighted; not equal scoring)
+// HTF bias +2, EMA stack +2, close vs 13 EMA +2,
+// location +1, volume +1, flag pattern +1, R/R passes +1
+// Max possible = 10
+// ============================================================
+bull_score = (htf_ok_bull ? 2 : 0) + (bullish_ema ? 2 : 0) + (close > e13 ? 2 : 0) + (above_pdh_pmh ? 1 : 0) + (volume_ok ? 1 : 0) + (bull_flag ? 1 : 0) + (bull_rr_ok ? 1 : 0)
+bear_score = (htf_ok_bear ? 2 : 0) + (bearish_ema ? 2 : 0) + (close < e13 ? 2 : 0) + (below_pdl_pml ? 1 : 0) + (volume_ok ? 1 : 0) + (bear_flag ? 1 : 0) + (bear_rr_ok ? 1 : 0)
+
+bull_tier = bull_score >= 9 ? "A+" : bull_score >= 7 ? "A " : bull_score >= 5 ? "B " : "WAIT"
+bear_tier = bear_score >= 9 ? "A+" : bear_score >= 7 ? "A " : bear_score >= 5 ? "B " : "WAIT"
+
+// ============================================================
+// FINAL SIGNAL — only on confirmed bar with break + score + volume + R:R
+// Individual checklist booleans (htf_ok_bull, bullish_ema, above_pdh_pmh,
+// bull_flag, etc.) remain available for the table display.
+// ============================================================
+bull_all = barstate.isconfirmed and bull_trigger and bull_score >= min_score and volume_ok and (not use_rr_filter or bull_rr_ok)
+bear_all = barstate.isconfirmed and bear_trigger and bear_score >= min_score and volume_ok and (not use_rr_filter or bear_rr_ok)
+
+bgcolor(bull_all ? color.new(color.green, 85) : na, title="Bull Setup BG")
+bgcolor(bear_all ? color.new(color.red,   85) : na, title="Bear Setup BG")
+
+plotshape(bull_all and not bull_all[1], title="BULL SETUP", style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.small, text="BULL")
+plotshape(bear_all and not bear_all[1], title="BEAR SETUP", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.small, text="BEAR")
+
+// ============================================================
+// TRADE LEVEL PLOTS (entry / stop / target — held for N bars after signal)
+// ============================================================
+var int   bars_since_bull   = na
+var int   bars_since_bear   = na
+var float last_bull_entry   = na
+var float last_bull_stop    = na
+var float last_bull_target  = na
+var float last_bear_entry   = na
+var float last_bear_stop    = na
+var float last_bear_target  = na
+
+if bull_all
+    bars_since_bull  := 0
+    last_bull_entry  := bull_entry
+    last_bull_stop   := bull_stop
+    last_bull_target := bull_target
+else if not na(bars_since_bull)
+    bars_since_bull := bars_since_bull + 1
+
+if bear_all
+    bars_since_bear  := 0
+    last_bear_entry  := bear_entry
+    last_bear_stop   := bear_stop
+    last_bear_target := bear_target
+else if not na(bars_since_bear)
+    bars_since_bear := bars_since_bear + 1
+
+show_bull_lvl = show_trade_levels and not na(bars_since_bull) and bars_since_bull <= trade_level_bars
+show_bear_lvl = show_trade_levels and not na(bars_since_bear) and bars_since_bear <= trade_level_bars
+
+plot(show_bull_lvl ? last_bull_entry  : na, "Bull Entry",  color=color.new(color.lime,  20), style=plot.style_linebr, linewidth=1)
+plot(show_bull_lvl ? last_bull_stop   : na, "Bull Stop",   color=color.new(color.red,   20), style=plot.style_linebr, linewidth=1)
+plot(show_bull_lvl ? last_bull_target : na, "Bull Target", color=color.new(color.green, 20), style=plot.style_linebr, linewidth=1)
+
+plot(show_bear_lvl ? last_bear_entry  : na, "Bear Entry",  color=color.new(color.maroon, 20), style=plot.style_linebr, linewidth=1)
+plot(show_bear_lvl ? last_bear_stop   : na, "Bear Stop",   color=color.new(color.red,    20), style=plot.style_linebr, linewidth=1)
+plot(show_bear_lvl ? last_bear_target : na, "Bear Target", color=color.new(color.green,  20), style=plot.style_linebr, linewidth=1)
+
+// ============================================================
+// CHECKLIST TABLE (compact, 3 columns: Label / Bull / Bear)
+// ============================================================
+f_pos(s) =>
+    s == "top_right"    ? position.top_right :
+     s == "top_left"     ? position.top_left :
+     s == "bottom_right" ? position.bottom_right :
+     s == "bottom_left"  ? position.bottom_left :
+     position.middle_right
+
+f_mark(b) => b ? "✅" : "❌"
+f_col(b)  => b ? color.new(color.green, 70) : color.new(color.red, 70)
+
+var table t = table.new(f_pos(tbl_pos), 3, 14, border_width=1)
+
+if show_tbl and barstate.islast
+    table.clear(t, 0, 0, 2, 13)
+
+    // Header
+    table.cell(t, 0, 0, "CHECKLIST", bgcolor=color.new(color.blue, 40), text_color=color.white)
+    table.cell(t, 1, 0, "BULL",      bgcolor=color.new(color.green, 50), text_color=color.white)
+    table.cell(t, 2, 0, "BEAR",      bgcolor=color.new(color.red,   50), text_color=color.white)
+
+    // 1H bias
+    table.cell(t, 0, 1, "1H Bias", text_color=color.white)
+    table.cell(t, 1, 1, htf_bull ? "🟢" : "⚪", bgcolor=f_col(htf_ok_bull))
+    table.cell(t, 2, 1, htf_bear ? "🔴" : "⚪", bgcolor=f_col(htf_ok_bear))
+
+    // Location (PDH+PMH / PDL+PML)
+    loc_txt = strict_location ? "Strict Loc" : "Relaxed Loc"
+    table.cell(t, 0, 2, loc_txt, text_color=color.white)
+    table.cell(t, 1, 2, f_mark(above_pdh_pmh), bgcolor=f_col(above_pdh_pmh))
+    table.cell(t, 2, 2, f_mark(below_pdl_pml), bgcolor=f_col(below_pdl_pml))
+
+    // EMA stack
+    table.cell(t, 0, 3, "EMA Stack", text_color=color.white)
+    table.cell(t, 1, 3, f_mark(bullish_ema), bgcolor=f_col(bullish_ema))
+    table.cell(t, 2, 3, f_mark(bearish_ema), bgcolor=f_col(bearish_ema))
+
+    // Flag pattern
+    table.cell(t, 0, 4, "Flag", text_color=color.white)
+    table.cell(t, 1, 4, f_mark(bull_flag), bgcolor=f_col(bull_flag))
+    table.cell(t, 2, 4, f_mark(bear_flag), bgcolor=f_col(bear_flag))
+
+    // Breakout trigger
+    table.cell(t, 0, 5, "Trigger", text_color=color.white)
+    table.cell(t, 1, 5, f_mark(bull_trigger), bgcolor=f_col(bull_trigger))
+    table.cell(t, 2, 5, f_mark(bear_trigger), bgcolor=f_col(bear_trigger))
+
+    // Volume (shared)
+    table.cell(t, 0, 6, "Volume OK", text_color=color.white)
+    table.cell(t, 1, 6, f_mark(volume_ok), bgcolor=f_col(volume_ok))
+    table.cell(t, 2, 6, f_mark(volume_ok), bgcolor=f_col(volume_ok))
+
+    // R:R passes
+    table.cell(t, 0, 7, "R:R OK", text_color=color.white)
+    table.cell(t, 1, 7, f_mark(bull_rr_ok), bgcolor=f_col(bull_rr_ok))
+    table.cell(t, 2, 7, f_mark(bear_rr_ok), bgcolor=f_col(bear_rr_ok))
+
+    // Risk %
+    table.cell(t, 0, 8, "Risk %", text_color=color.white)
+    table.cell(t, 1, 8, str.tostring(bull_risk_pct, "#.##") + "%")
+    table.cell(t, 2, 8, str.tostring(bear_risk_pct, "#.##") + "%")
+
+    // Target
+    table.cell(t, 0, 9, "Target", text_color=color.white)
+    table.cell(t, 1, 9, str.tostring(bull_target, "#.##"))
+    table.cell(t, 2, 9, str.tostring(bear_target, "#.##"))
+
+    // Score
+    table.cell(t, 0, 10, "Score / 10", text_color=color.white)
+    table.cell(t, 1, 10, str.tostring(bull_score) + "/10")
+    table.cell(t, 2, 10, str.tostring(bear_score) + "/10")
+
+    // Tier
+    table.cell(t, 0, 11, "Quality", text_color=color.white)
+    table.cell(t, 1, 11, bull_tier, bgcolor=bull_score >= min_score ? color.new(color.green, 40) : color.new(color.gray, 60), text_color=color.white)
+    table.cell(t, 2, 11, bear_tier, bgcolor=bear_score >= min_score ? color.new(color.red,   40) : color.new(color.gray, 60), text_color=color.white)
+
+    // Final fire state
+    table.cell(t, 0, 12, "FIRE", bgcolor=color.new(color.gray, 40), text_color=color.white)
+    table.cell(t, 1, 12, bull_all ? "🟢 LONG"  : "—", bgcolor=bull_all ? color.new(color.green, 20) : color.new(color.gray, 70), text_color=color.white)
+    table.cell(t, 2, 12, bear_all ? "🔴 SHORT" : "—", bgcolor=bear_all ? color.new(color.red,   20) : color.new(color.gray, 70), text_color=color.white)
+
+    // Footer summary
+    bias_txt = bull_all ? "🟢 LONG OK" : bear_all ? "🔴 SHORT OK" : (use_htf_gate and not htf_bull and not htf_bear) ? "⏸ 1H MIXED" : "⏸ WAIT"
+    table.cell(t, 0, 13, "Status", bgcolor=color.new(color.gray, 40), text_color=color.white)
+    table.cell(t, 1, 13, bias_txt, bgcolor=color.new(color.gray, 40), text_color=color.white)
+    table.cell(t, 2, 13, "min " + str.tostring(min_score), bgcolor=color.new(color.gray, 40), text_color=color.white)
+
+// ============================================================
+// HORIZONTAL DEBUG PANEL — TIMING / TRIGGER / CONFIRMATION
+// 3 side-by-side panels so you can instantly diagnose why a
+// signal did or did not fire.
+// ============================================================
+var table dbg = table.new(f_pos(debug_pos), 3, 2, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 50), frame_width=1, frame_color=color.new(color.gray, 30))
+
+ck(bool b) => b ? "✅" : "❌"
+
+if show_debug_panel and barstate.islast
+    // TIMING — prerequisites to allow firing
+    timing_txt = "▶ TIMING — allowed?\n" + "──────────────────\n" + "Bar confirmed   " + ck(barstate.isconfirmed) + "\n" + "HTF gate on     " + ck(use_htf_gate) + "\n" + "1H Bull aligned " + ck(htf_ok_bull) + "\n" + "1H Bear aligned " + ck(htf_ok_bear)
+
+    // TRIGGER — did the actual breakout event happen?
+    trigger_txt = "▶ TRIGGER — break?\n" + "──────────────────\n" + "Bull flag       " + ck(bull_flag) + "\n" + "Bear flag       " + ck(bear_flag) + "\n" + "flag_high       " + str.tostring(flag_high, "#.##") + "\n" + "flag_low        " + str.tostring(flag_low,  "#.##") + "\n" + "Bull break      " + ck(bull_trigger) + "\n" + "Bear break      " + ck(bear_trigger)
+
+    // CONFIRMATION — context supportive?
+    loc_label = strict_location ? "Strict" : "Relaxed"
+    confirm_txt = "▶ CONFIRMATION — context?\n" + "─────────────────────────\n" + "Volume          " + ck(volume_ok) + "\n" + "Loc bull (" + loc_label + ") " + ck(above_pdh_pmh) + "\n" + "Loc bear (" + loc_label + ") " + ck(below_pdl_pml) + "\n" + "EMA bull stack  " + ck(bullish_ema) + "\n" + "EMA bear stack  " + ck(bearish_ema) + "\n" + "Close > 13 EMA  " + ck(close > e13) + "\n" + "Close < 13 EMA  " + ck(close < e13) + "\n" + "Bull R:R ok     " + ck(bull_rr_ok) + " (" + str.tostring(bull_risk_pct, "#.##") + "% risk)\n" + "Bear R:R ok     " + ck(bear_rr_ok) + " (" + str.tostring(bear_risk_pct, "#.##") + "% risk)\n" + "─────────────────────────\n" + "SCORE bull " + str.tostring(bull_score) + "/10  [" + bull_tier + "]\n" + "SCORE bear " + str.tostring(bear_score) + "/10  [" + bear_tier + "]\n" + "min_score = " + str.tostring(min_score)
+
+    table.cell(dbg, 0, 0, timing_txt,  text_color=color.new(color.white, 0), bgcolor=color.new(color.blue,   80), text_size=size.small, text_halign=text.align_left)
+    table.cell(dbg, 1, 0, trigger_txt, text_color=color.new(color.white, 0), bgcolor=color.new(color.orange, 80), text_size=size.small, text_halign=text.align_left)
+    table.cell(dbg, 2, 0, confirm_txt, text_color=color.new(color.white, 0), bgcolor=color.new(color.purple, 80), text_size=size.small, text_halign=text.align_left)
+
+    // FINAL row — score + tier + fire state
+    bullBg = bull_all ? color.new(color.green, 20) : color.new(color.gray, 70)
+    bearBg = bear_all ? color.new(color.red,   20) : color.new(color.gray, 70)
+    midBg  = (bull_all or bear_all) ? color.new(color.yellow, 50) : color.new(color.gray, 80)
+
+    bull_cell_txt = bull_all ? "🟢 LONG → FIRE!  " + str.tostring(bull_score) + "/10 " + bull_tier : "🟢 LONG → —  " + str.tostring(bull_score) + "/10 " + bull_tier
+    bear_cell_txt = bear_all ? "🔴 SHORT → FIRE!  " + str.tostring(bear_score) + "/10 " + bear_tier : "🔴 SHORT → —  " + str.tostring(bear_score) + "/10 " + bear_tier
+    mid_cell_txt  = (bull_all or bear_all) ? "⚡ SIGNAL ⚡" : "⏳ Waiting..."
+
+    table.cell(dbg, 0, 1, bull_cell_txt, text_color=color.white, bgcolor=bullBg, text_size=size.small, text_halign=text.align_center)
+    table.cell(dbg, 1, 1, mid_cell_txt,  text_color=color.white, bgcolor=midBg,  text_size=size.small, text_halign=text.align_center)
+    table.cell(dbg, 2, 1, bear_cell_txt, text_color=color.white, bgcolor=bearBg, text_size=size.small, text_halign=text.align_center)
+
+// ============================================================
+// ALERTS — static named conditions (for TradingView's native
+// Create-Alert dropdown; harmless if unused) + Discord options
+// format alert below.
+// ============================================================
+alertcondition(bull_all and not bull_all[1], "Casey Bull Setup", "Casey Bull Setup")
+alertcondition(bear_all and not bear_all[1], "Casey Bear Setup", "Casey Bear Setup")
+
+// ============================================================
+// OPTIONS-FORMAT DISCORD ALERTS
+// Discord-compatible {"content":"..."} payload with option contract
+// (strike, expiration, premium estimate, entry/stop/target).
+// Create one TradingView alert with Condition = "Any alert() function
+// call" and Webhook URL = your Discord webhook.
+// ============================================================
+f_monthName(int m) =>
+    m == 1 ? "JAN" : m == 2 ? "FEB" : m == 3 ? "MAR" : m == 4 ? "APR" : m == 5 ? "MAY" : m == 6 ? "JUN" : m == 7 ? "JUL" : m == 8 ? "AUG" : m == 9 ? "SEP" : m == 10 ? "OCT" : m == 11 ? "NOV" : "DEC"
+
+exp_time  = time + dte_days * 86400000
+exp_month = f_monthName(month(exp_time))
+exp_day   = dayofmonth(exp_time)
+
+f_optionMsg(bool is_call) =>
+    strike_base = is_call ? close + strike_offset : close - strike_offset
+    strike      = math.round(strike_base / strike_round) * strike_round
+    opt_letter  = is_call ? "C" : "P"
+
+    entry_v    = is_call ? bull_entry    : bear_entry
+    stop_v     = is_call ? bull_stop     : bear_stop
+    target_v   = is_call ? bull_target   : bear_target
+    risk_pct_v = is_call ? bull_risk_pct : bear_risk_pct
+    score_v    = is_call ? bull_score    : bear_score
+    tier_v     = is_call ? bull_tier     : bear_tier
+
+    premium_est = strike * premium_est_pct / 100.0
+    vol_tag = volume_ok ? " with volume" : ""
+    htf_tag = is_call ? (htf_bull ? "1H Bull" : "1H Mixed") : (htf_bear ? "1H Bear" : "1H Mixed")
+    ema_tag = is_call ? (bullish_ema ? "EMA Bull" : "EMA Mixed") : (bearish_ema ? "EMA Bear" : "EMA Mixed")
+    loc_tag = is_call ? (above_pdh_pmh ? (strict_location ? "Above PDH/PMH" : "Above PDH or PMH") : "Mixed Loc") : (below_pdl_pml ? (strict_location ? "Below PDL/PML" : "Below PDL or PML") : "Mixed Loc")
+
+    msg = bot_name + " " + action_verb + " | " + syminfo.ticker + " " + exp_month + " " + str.tostring(exp_day) + " " + str.tostring(strike, "#.##") + opt_letter + " $" + str.tostring(premium_est, "#.##") + "\\n📊 Setup: Casey " + (is_call ? "Bull" : "Bear") + " Flag Break  [" + tier_v + " — " + str.tostring(score_v) + "/10]" + "\\n📈 Trigger: $" + str.tostring(entry_v, "#.##") + (is_call ? " above flag high" : " below flag low") + vol_tag + "\\n🎯 Target: $" + str.tostring(target_v, "#.##") + " (" + str.tostring(target_rr, "#.#") + "R)" + "\\n🛑 Stop: $" + str.tostring(stop_v, "#.##") + " (" + str.tostring(risk_pct_v, "#.##") + "% risk)" + "\\n✅ " + htf_tag + " | " + ema_tag + " | " + loc_tag
+
+    "{\"content\":\"" + msg + "\"}"
+
+if use_options_format and bull_all and not bull_all[1]
+    alert(f_optionMsg(true), alert.freq_once_per_bar_close)
+
+if use_options_format and bear_all and not bear_all[1]
+    alert(f_optionMsg(false), alert.freq_once_per_bar_close)

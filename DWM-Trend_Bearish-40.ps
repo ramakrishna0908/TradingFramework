@@ -32,19 +32,10 @@ obvEmaLen = input.int(20, "OBV EMA Length", minval = 1, group = grpVol)
 volSmaLen = input.int(20, "Volume SMA Length", minval = 1, group = grpVol)
 
 grpMTF = "Multi-Timeframe"
-mtfMode = input.string("Daily + Weekly + Monthly",
-"Final Bearish requires",
-options = ["Daily only",
-"Daily + Weekly",
-"Daily + Weekly + Monthly"],
-group = grpMTF)
+mtfMode = input.string("Daily + Weekly + Monthly", "Final Bearish requires", options = ["Daily only", "Daily + Weekly", "Daily + Weekly + Monthly"], group = grpMTF)
 
 grpScr = "Screener"
-tblPos = input.string("top_right", "Table Position",
-options = ["top_left","top_right","top_center",
-"middle_left","middle_right","middle_center",
-"bottom_left","bottom_right","bottom_center"],
-group = grpScr)
+tblPos = input.string("top_right", "Table Position", options = ["top_left","top_right","top_center", "middle_left","middle_right","middle_center","bottom_left","bottom_right","bottom_center"],group = grpScr)
 showOnlyBear = input.bool(false, "Dim non-bearish rows", group = grpScr)
 
 // -----------------------------------------------------------------------------
@@ -196,8 +187,7 @@ frame_width = 1)
 f_mark(b) => b ? "✅" : "❌"
 
 f_tt(\_obv, \_vr) =>
-"OBV: " + str.tostring(\_obv, format.volume) +
-"\nVol/Vol-SMA: " + (na(\_vr) ? "n/a" : str.tostring(\_vr, "#.##"))
+"OBV: " + str.tostring(\_obv, format.volume) +"\nVol/Vol-SMA: " + (na(\_vr) ? "n/a" : str.tostring(\_vr, "#.##"))
 
 f_cellTF(\_col, \_row, \_bear, \_obvOK, \_volOK, \_obv, \_vr) =>
 bg = \_bear ? color.new(color.red, 60) : color.new(color.green, 80)
@@ -220,14 +210,14 @@ finalBg = \_final ? color.new(color.red, 40)
 table.cell(scr, 0, \_r, \_sym,
 bgcolor = finalBg,
 text_size = size.small,
-text_color= color.white)
+text_color= color.blue)
 f_cellTF(1, \_r, \_dB, \_dO, \_dV, \_dObv, \_dVr)
 f_cellTF(2, \_r, \_wB, \_wO, \_wV, \_wObv, \_wVr)
 f_cellTF(3, \_r, \_mB, \_mO, \_mV, \_mObv, \_mVr)
 table.cell(scr, 4, \_r, f_mark(\_final),
 bgcolor = finalBg,
 text_size = size.small,
-text_color = color.white)
+text_color = color.blue)
 
 if barstate.islast
 hdrBg = color.new(color.black, 60)

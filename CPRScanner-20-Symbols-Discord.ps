@@ -1,0 +1,307 @@
+//@version=6
+indicator("CPR Scanner — 20 Symbols + Discord (Tunable)", overlay=true)
+
+// ============================================================
+// INPUTS
+// ============================================================
+
+// ===== Mode preset =====
+grpMode = "Mode Preset"
+modeStr = input.string("Balanced", "Mode",
+options=["Aggressive", "Balanced", "Conservative", "Custom"],
+group=grpMode,
+tooltip="Aggressive=most alerts, Balanced=recommended, Conservative=high quality only, Custom=use the manual values below")
+
+// ===== Signal Quality =====
+grpSig = "Signal Quality"
+useRsiStrength = input.bool(true, "Enable RSI Strength Floor", group=grpSig)
+rsiBullMinManual = input.int(55, "RSI Bull Min (Custom mode)", minval=40, maxval=80, group=grpSig)
+rsiBearMaxManual = input.int(45, "RSI Bear Max (Custom mode)", minval=20, maxval=60, group=grpSig)
+
+// ===== Intraday Volume Filter =====
+grpVol = "Intraday Volume Filter"
+useIntradayVol = input.bool(true, "Enable Intraday Volume Filter", group=grpVol,
+tooltip="Uses chart-timeframe volume (not daily) — confirms participation without waiting for daily volume to build up")
+intradayVolLen = input.int(20, "Intraday Vol SMA Length", minval=5, maxval=200, group=grpVol)
+intradayVolMultMan = input.float(1.2, "Intraday Vol Multiplier (Custom mode)", minval=0.5, maxval=3.0, step=0.1, group=grpVol)
+
+// ===== Confirm Bars =====
+grpConf = "Confirm Bars (anti-whip)"
+useConfirmBars = input.bool(false, "Enable Confirm Bars", group=grpConf,
+tooltip="Require state to hold for N consecutive bars before firing. Adds lag but kills whips.")
+confirmBarsManual = input.int(1, "Confirm Bars (Custom mode)", minval=0, maxval=5, group=grpConf)
+
+// ===== Alert Throttling =====
+grpThr = "Alert Throttling"
+useCooldown = input.bool(true, "Enable Cooldown", group=grpThr,
+tooltip="Don't re-alert same symbol+direction within N bars")
+cooldownBarsManual = input.int(30, "Cooldown Bars (Custom mode)", minval=1, maxval=500, group=grpThr)
+useDailyLimit = input.bool(true, "One Alert Per Direction Per Day", group=grpThr)
+
+// ===== Watch (yellow) Alerts =====
+grpWatch = "Watch Alerts"
+useWatch = input.bool(true, "Enable Watch (Yellow) Alerts", group=grpWatch)
+watchZonePctMan = input.float(0.25, "Watch Zone % below TC (Custom mode)", minval=0.0, maxval=2.0, step=0.05, group=grpWatch)
+watchRsiMinManual = input.int(50, "Watch RSI Min (Custom mode)", minval=40, maxval=70, group=grpWatch)
+suppressWatch = input.bool(true, "Suppress watch if bull/bear fired recently", group=grpWatch)
+
+// ============================================================
+// RESOLVE PRESET VALUES (Mode overrides Custom unless mode=Custom)
+// ============================================================
+rsiBullMin = modeStr == "Aggressive" ? 50.0 : modeStr == "Balanced" ? 55.0 : modeStr == "Conservative" ? 60.0 : float(rsiBullMinManual)
+rsiBearMax = modeStr == "Aggressive" ? 50.0 : modeStr == "Balanced" ? 45.0 : modeStr == "Conservative" ? 40.0 : float(rsiBearMaxManual)
+intradayVolMult = modeStr == "Aggressive" ? 1.0 : modeStr == "Balanced" ? 1.2 : modeStr == "Conservative" ? 1.3 : intradayVolMultMan
+confirmBars = modeStr == "Aggressive" ? 0 : modeStr == "Balanced" ? 1 : modeStr == "Conservative" ? 2 : confirmBarsManual
+cooldownBars = modeStr == "Aggressive" ? 10 : modeStr == "Balanced" ? 30 : modeStr == "Conservative" ? 60 : cooldownBarsManual
+watchZonePct = modeStr == "Aggressive" ? 0.5 : modeStr == "Balanced" ? 0.25: modeStr == "Conservative" ? 0.10: watchZonePctMan
+watchRsiMin = modeStr == "Aggressive" ? 47 : modeStr == "Balanced" ? 50 : modeStr == "Conservative" ? 55 : watchRsiMinManual
+
+// ============================================================
+// SYMBOLS + DISPLAY NAMES
+// ============================================================
+sym1 = "AMEX:SPY"
+sym2 = "NASDAQ:QQQ"
+sym3 = "AMEX:IWM"
+sym4 = "NASDAQ:AAPL"
+sym5 = "NASDAQ:NVDA"
+sym6 = "NASDAQ:TSLA"
+sym7 = "NASDAQ:AMZN"
+sym8 = "NASDAQ:META"
+sym9 = "NASDAQ:MSFT"
+sym10 = "NASDAQ:GOOGL"
+sym11 = "NASDAQ:AMD"
+sym12 = "NASDAQ:COIN"
+sym13 = "NASDAQ:PLTR"
+sym14 = "NASDAQ:NFLX"
+sym15 = "NASDAQ:AVGO"
+sym16 = "NYSE:BA"
+sym17 = "NASDAQ:INTC"
+sym18 = "NYSE:BAC"
+sym19 = "NASDAQ:MU"
+sym20 = "NYSE:DIS"
+disp1 = "SPY"
+disp2 = "QQQ"
+disp3 = "IWM"
+disp4 = "AAPL"
+disp5 = "NVDA"
+disp6 = "TSLA"
+disp7 = "AMZN"
+disp8 = "META"
+disp9 = "MSFT"
+disp10 = "GOOGL"
+disp11 = "AMD"
+disp12 = "COIN"
+disp13 = "PLTR"
+disp14 = "NFLX"
+disp15 = "AVGO"
+disp16 = "BA"
+disp17 = "INTC"
+disp18 = "BAC"
+disp19 = "MU"
+disp20 = "DIS"
+
+// ============================================================
+// PER-SYMBOL FETCH + SIGNAL
+// ============================================================
+f_scan(string sym) =>
+// Daily data — for CPR + RSI + weekly proxy
+[dH, dL, dC, dClose, dRsi, dDailyVol, dDailyVolSma, wH, wL, wC] = request.security(sym, "D",
+[high[1], low[1], close[1], close, ta.rsi(close, 14), volume, ta.sma(volume, 20),
+ta.highest(high, 5)[1], ta.lowest(low, 5)[1], close[5]],
+lookahead=barmerge.lookahead_off)
+
+    // Intraday volume from each symbol on the CHART timeframe (faster than daily)
+    [intraVol, intraVolSma] = request.security(sym, timeframe.period,
+         [volume, ta.sma(volume, intradayVolLen)],
+         lookahead=barmerge.lookahead_off)
+
+    // CPR
+    dPP = (dH + dL + dC) / 3
+    dBC = (dH + dL) / 2
+    dTC = 2 * dPP - dBC
+
+    // Weekly pivot proxy
+    wPP = (wH + wL + wC) / 3
+
+    // Daily volume — still computed for display (the legacy Vol>SMA column)
+    dailyVolOK = na(dDailyVol) or na(dDailyVolSma) ? false : dDailyVol > dDailyVolSma
+
+    // Intraday volume — the NEW participation gate
+    intraVolOK = na(intraVol) or na(intraVolSma) ? false : intraVol > intraVolSma * intradayVolMult
+
+    // RSI strength gate (toggleable)
+    rsiBullOK = not useRsiStrength or dRsi > rsiBullMin
+    rsiBearOK = not useRsiStrength or dRsi < rsiBearMax
+    rsiBullSoft = dRsi > 50
+    rsiBearSoft = dRsi < 50
+
+    // Volume gate (toggleable)
+    volGateBull = not useIntradayVol or intraVolOK
+    volGateBear = not useIntradayVol or intraVolOK
+
+    // Core signal (pre-confirm-bars)
+    bullCore = dClose > dTC and dClose > wPP and (useRsiStrength ? rsiBullOK : rsiBullSoft) and volGateBull
+    bearCore = dClose < dBC and dClose < wPP and (useRsiStrength ? rsiBearOK : rsiBearSoft) and volGateBear
+
+    // Confirm-bars logic — per-symbol streak counter (var is per-call-site in Pine)
+    var int bullStreak = 0
+    var int bearStreak = 0
+    bullStreak := bullCore ? bullStreak + 1 : 0
+    bearStreak := bearCore ? bearStreak + 1 : 0
+
+    // If confirm-bars is ON, require streak > confirmBars; else fire on first bar
+    bullish = useConfirmBars ? (bullCore and bullStreak > confirmBars) : bullCore
+    bearish = useConfirmBars ? (bearCore and bearStreak > confirmBars) : bearCore
+
+    // Watch (pre-breakout) — toggleable, parameters from preset
+    watching = useWatch and not bullish and not bearish and
+                 dClose >= dTC * (1.0 - watchZonePct / 100.0) and dClose < dTC and
+                 dRsi > watchRsiMin
+
+    // Display
+    sigEmoji = bullish ? "🔵" : bearish ? "🔴" : watching ? "🟡" : "⚪"
+    sigCol   = bullish ? color.new(color.green, 0) : bearish ? color.new(color.red, 0) :
+               watching ? color.new(color.yellow, 0) : color.new(color.gray, 0)
+
+    [dClose, sigEmoji, sigCol, dRsi, dailyVolOK, intraVolOK, bullish, bearish, watching]
+
+// ============================================================
+// SCAN ALL SYMBOLS
+// (v=daily vol display, iv=intraday vol display, b=bull, x=bear, w=watch)
+// ============================================================
+[p1, s1, c1, r1, v1, iv1, b1, x1, w1] = f_scan(sym1)
+[p2, s2, c2, r2, v2, iv2, b2, x2, w2] = f_scan(sym2)
+[p3, s3, c3, r3, v3, iv3, b3, x3, w3] = f_scan(sym3)
+[p4, s4, c4, r4, v4, iv4, b4, x4, w4] = f_scan(sym4)
+[p5, s5, c5, r5, v5, iv5, b5, x5, w5] = f_scan(sym5)
+[p6, s6, c6, r6, v6, iv6, b6, x6, w6] = f_scan(sym6)
+[p7, s7, c7, r7, v7, iv7, b7, x7, w7] = f_scan(sym7)
+[p8, s8, c8, r8, v8, iv8, b8, x8, w8] = f_scan(sym8)
+[p9, s9, c9, r9, v9, iv9, b9, x9, w9] = f_scan(sym9)
+[p10, s10, c10, r10, v10, iv10, b10, x10, w10] = f_scan(sym10)
+[p11, s11, c11, r11, v11, iv11, b11, x11, w11] = f_scan(sym11)
+[p12, s12, c12, r12, v12, iv12, b12, x12, w12] = f_scan(sym12)
+[p13, s13, c13, r13, v13, iv13, b13, x13, w13] = f_scan(sym13)
+[p14, s14, c14, r14, v14, iv14, b14, x14, w14] = f_scan(sym14)
+[p15, s15, c15, r15, v15, iv15, b15, x15, w15] = f_scan(sym15)
+[p16, s16, c16, r16, v16, iv16, b16, x16, w16] = f_scan(sym16)
+[p17, s17, c17, r17, v17, iv17, b17, x17, w17] = f_scan(sym17)
+[p18, s18, c18, r18, v18, iv18, b18, x18, w18] = f_scan(sym18)
+[p19, s19, c19, r19, v19, iv19, b19, x19, w19] = f_scan(sym19)
+[p20, s20, c20, r20, v20, iv20, b20, x20, w20] = f_scan(sym20)
+
+// ============================================================
+// DISCORD ALERTS (with cooldown + daily limit + watch suppression)
+// ============================================================
+f_alert(string disp, float price, bool bullish, bool bearish, bool watching, float rsi) =>
+// Per-symbol state (var-in-function is per-call-site in Pine — independent per symbol)
+var int lastBullBar = na
+var int lastBearBar = na
+var int lastWatchBar = na
+var bool firedBullToday = false
+var bool firedBearToday = false
+
+    // Reset daily flags at session/day rollover
+    newDay = ta.change(time("D")) != 0
+    if newDay
+        firedBullToday := false
+        firedBearToday := false
+
+    // Flip detection (first bar entering new state)
+    bullishFlip = bullish  and not bullish[1]
+    bearishFlip = bearish  and not bearish[1]
+    watchFlip   = watching and not watching[1]
+
+    // Cooldown check (per direction, per symbol)
+    bullCdOK  = not useCooldown or na(lastBullBar)  or (bar_index - lastBullBar)  >= cooldownBars
+    bearCdOK  = not useCooldown or na(lastBearBar)  or (bar_index - lastBearBar)  >= cooldownBars
+    watchCdOK = not useCooldown or na(lastWatchBar) or (bar_index - lastWatchBar) >= cooldownBars
+
+    // One-per-direction-per-day check
+    dailyBullOK = not useDailyLimit or not firedBullToday
+    dailyBearOK = not useDailyLimit or not firedBearToday
+
+    // Watch suppression — don't fire watch if bull/bear fired within cooldown window
+    recentBull = useCooldown and not na(lastBullBar)  and (bar_index - lastBullBar)  < cooldownBars
+    recentBear = useCooldown and not na(lastBearBar)  and (bar_index - lastBearBar)  < cooldownBars
+    watchSuppressed = suppressWatch and (recentBull or recentBear)
+
+    if bullishFlip and bullCdOK and dailyBullOK
+        alert('{"content":"🔵 ' + disp + ' BULLISH at ' + str.tostring(price, "#.##") + ' | RSI: ' + str.tostring(rsi, "#.#") + '"}', alert.freq_once_per_bar)
+        lastBullBar    := bar_index
+        firedBullToday := true
+
+    if bearishFlip and bearCdOK and dailyBearOK
+        alert('{"content":"🔴 ' + disp + ' BEARISH at ' + str.tostring(price, "#.##") + ' | RSI: ' + str.tostring(rsi, "#.#") + '"}', alert.freq_once_per_bar)
+        lastBearBar    := bar_index
+        firedBearToday := true
+
+    if useWatch and watchFlip and watchCdOK and not watchSuppressed
+        alert('{"content":"🟡 ' + disp + ' near breakout at ' + str.tostring(price, "#.##") + ' | RSI: ' + str.tostring(rsi, "#.#") + ' — watch for flip"}', alert.freq_once_per_bar)
+        lastWatchBar := bar_index
+
+f_alert(disp1, p1, b1, x1, w1, r1)
+f_alert(disp2, p2, b2, x2, w2, r2)
+f_alert(disp3, p3, b3, x3, w3, r3)
+f_alert(disp4, p4, b4, x4, w4, r4)
+f_alert(disp5, p5, b5, x5, w5, r5)
+f_alert(disp6, p6, b6, x6, w6, r6)
+f_alert(disp7, p7, b7, x7, w7, r7)
+f_alert(disp8, p8, b8, x8, w8, r8)
+f_alert(disp9, p9, b9, x9, w9, r9)
+f_alert(disp10, p10, b10, x10, w10, r10)
+f_alert(disp11, p11, b11, x11, w11, r11)
+f_alert(disp12, p12, b12, x12, w12, r12)
+f_alert(disp13, p13, b13, x13, w13, r13)
+f_alert(disp14, p14, b14, x14, w14, r14)
+f_alert(disp15, p15, b15, x15, w15, r15)
+f_alert(disp16, p16, b16, x16, w16, r16)
+f_alert(disp17, p17, b17, x17, w17, r17)
+f_alert(disp18, p18, b18, x18, w18, r18)
+f_alert(disp19, p19, b19, x19, w19, r19)
+f_alert(disp20, p20, b20, x20, w20, r20)
+
+// ============================================================
+// TABLE — top-right display
+// Columns: Symbol | Price | Sig | RSI | DVol | IVol
+// ============================================================
+var table t = table.new(position.top_right, 6, 41, bgcolor=color.new(color.black, 30), border_width=1, border_color=color.new(color.gray, 50))
+
+f_row(int row, string disp, float price, string sig, color sigCol, float rsi, bool dVolOK, bool iVolOK) =>
+table.cell(t, 0, row, disp, text_color=color.white, text_size=size.small)
+table.cell(t, 1, row, str.tostring(price, "#.##"), text_color=color.white, text_size=size.small)
+table.cell(t, 2, row, sig, text_color=sigCol, text_size=size.small)
+table.cell(t, 3, row, str.tostring(rsi, "#.#"),
+text_color=rsi > 50 ? color.lime : rsi < 50 ? color.red : color.white,
+text_size=size.small)
+table.cell(t, 4, row, dVolOK ? "✓" : "✗", text_color=dVolOK ? color.lime : color.red, text_size=size.small)
+table.cell(t, 5, row, iVolOK ? "✓" : "✗", text_color=iVolOK ? color.lime : color.red, text_size=size.small)
+
+if barstate.isconfirmed
+table.cell(t, 0, 0, "Symbol", text_color=color.yellow, text_size=size.small)
+table.cell(t, 1, 0, "Price", text_color=color.yellow, text_size=size.small)
+table.cell(t, 2, 0, "Sig", text_color=color.yellow, text_size=size.small)
+table.cell(t, 3, 0, "RSI", text_color=color.yellow, text_size=size.small)
+table.cell(t, 4, 0, "DVol", text_color=color.yellow, text_size=size.small)
+table.cell(t, 5, 0, "IVol", text_color=color.yellow, text_size=size.small)
+
+    f_row(1,  disp1,  p1,  s1,  c1,  r1,  v1,  iv1)
+    f_row(2,  disp2,  p2,  s2,  c2,  r2,  v2,  iv2)
+    f_row(3,  disp3,  p3,  s3,  c3,  r3,  v3,  iv3)
+    f_row(4,  disp4,  p4,  s4,  c4,  r4,  v4,  iv4)
+    f_row(5,  disp5,  p5,  s5,  c5,  r5,  v5,  iv5)
+    f_row(6,  disp6,  p6,  s6,  c6,  r6,  v6,  iv6)
+    f_row(7,  disp7,  p7,  s7,  c7,  r7,  v7,  iv7)
+    f_row(8,  disp8,  p8,  s8,  c8,  r8,  v8,  iv8)
+    f_row(9,  disp9,  p9,  s9,  c9,  r9,  v9,  iv9)
+    f_row(10, disp10, p10, s10, c10, r10, v10, iv10)
+    f_row(11, disp11, p11, s11, c11, r11, v11, iv11)
+    f_row(12, disp12, p12, s12, c12, r12, v12, iv12)
+    f_row(13, disp13, p13, s13, c13, r13, v13, iv13)
+    f_row(14, disp14, p14, s14, c14, r14, v14, iv14)
+    f_row(15, disp15, p15, s15, c15, r15, v15, iv15)
+    f_row(16, disp16, p16, s16, c16, r16, v16, iv16)
+    f_row(17, disp17, p17, s17, c17, r17, v17, iv17)
+    f_row(18, disp18, p18, s18, c18, r18, v18, iv18)
+    f_row(19, disp19, p19, s19, c19, r19, v19, iv19)
+    f_row(20, disp20, p20, s20, c20, r20, v20, iv20)
