@@ -1,0 +1,6 @@
+{
+  "name": "Options Trading Framework",
+  "description": "An options trading alert engine and web dashboard with TradingView MCP visualizer, real-time alert feed, order simulation, and risk management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

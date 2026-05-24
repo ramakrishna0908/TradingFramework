@@ -8,25 +8,31 @@
 
 ## What It Does
 
-Scans 20 high-liquidity tickers every daily bar. Each ticker gets a bull score and bear score (0–7) based on how many indicators are aligned. When a score crosses your threshold for N consecutive bars, a Discord alert fires with the option trade details — ticker, expiry, strike, targets, and stop.
+Scans 20 high-liquidity tickers every daily bar. Each ticker gets a bull score and bear score (0–11) based on how many indicators are aligned and how much weight each carries. When a score crosses your threshold for N consecutive bars, a Discord alert fires with the option trade details — ticker, expiry, strike, targets, and stop.
 
 ---
 
-## Scoring System (0–7 per symbol)
+## Scoring System (0–11 per symbol)
 
-Each enabled indicator contributes 1 point. Bull and bear scores are independent.
+Indicators are weighted by signal type. Momentary signals (fires when price is at an extreme *right now*) carry more weight than persistent signals (trend backdrop that holds across many bars).
 
-| Indicator | Bull (1 pt) | Bear (1 pt) |
-|---|---|---|
-| **CPR** | Price > TC (cleared pivot ceiling) | Price < BC (broke pivot floor) |
-| **Bollinger Bands** | Close > upper band | Close < lower band |
-| **EMA Cross** | Fast > Slow + price above fast EMA | Fast < Slow + price below fast EMA |
-| **RSI** | RSI > bull level (default 55) | RSI < bear level (default 45) |
-| **Chaikin Money Flow** | CMF > 0.05 (institutional buying) | CMF < -0.05 (selling pressure) |
-| **Ichimoku** | Price > Conversion > Base | Price < Conversion < Base |
-| **Volume Surge** | Vol > 1.5x avg AND above CPR | Vol > 1.5x avg AND below CPR |
+| Indicator | Weight | Type | Bull (earns pts) | Bear (earns pts) |
+|---|---|---|---|---|
+| **CPR** | **3** | Momentary | Price > TC (cleared pivot ceiling) | Price < BC (broke pivot floor) |
+| **Volume Surge** | **2** | Momentary | Vol > 1.5x avg AND above TC | Vol > 1.5x avg AND below BC |
+| **Bollinger Bands** | **2** | Momentary | Close > upper band | Close < lower band |
+| **EMA Cross** | 1 | Persistent | Fast > Slow + price above fast EMA | Fast < Slow + price below fast EMA |
+| **RSI** | 1 | Persistent | RSI > bull level (default 55) | RSI < bear level (default 45) |
+| **Chaikin Money Flow** | 1 | Persistent | CMF > 0.05 (institutional buying) | CMF < -0.05 (selling pressure) |
+| **Ichimoku** | 1 | Persistent | Price > Conversion > Base | Price < Conversion < Base |
 
-**Confidence:** `1-2 = LOW` | `3-4 = MED` | `5+ = HIGH`
+**Max possible score: 11**
+
+**Confidence thresholds:** `< 6 = LOW` | `6–8 = MED` | `≥ 9 = HIGH`
+
+**Recommended Min Score setting:**
+- `7` — solid setups (CPR + Vol + one or two trend indicators)
+- `9+` — high-conviction only (requires CPR + Vol + BB all firing simultaneously)
 
 ---
 
@@ -64,18 +70,18 @@ Stop for calls = below TC. Stop for puts = above BC.
 
 ```
 @bot BOUGHT | MSFT MAY 23 415C $4.20
-📊 Signal: CPR TC Break  [MED conf] (1-bar confirmed)
-📈 Trigger: $410.25 (TC) cleared with volume
-🎯 Targets: R1 $418.50 -> R2 $426.75
-🛑 Stop: Below TC $410.25
+Signal: CPR TC Break  [MED conf] Score 8/11 (1-bar confirmed)
+Trigger: $410.25 (TC) cleared
+Targets: R1 $418.50 R2 $426.75
+Stop: Below TC $410.25
 ```
 
 ```
 @bot BOUGHT | COIN MAY 23 205P $3.80
-📊 Signal: CPR BC Break  [HIGH conf] (2-bar confirmed)
-📈 Trigger: $210.50 (BC) broken with volume
-🎯 Targets: S1 $198.25 -> S2 $186.00
-🛑 Stop: Above BC $210.50
+Signal: CPR BC Break  [HIGH conf] Score 9/11 (2-bar confirmed)
+Trigger: $210.50 (BC) broken
+Targets: S1 $198.25 S2 $186.00
+Stop: Above BC $210.50
 ```
 
 ---
@@ -96,15 +102,15 @@ Stop for calls = below TC. Stop for puts = above BC.
 ## All Settings
 
 ### Signal Filters (toggle on/off)
-| Setting | Default | What it does |
-|---|---|---|
-| CPR Breakout | ON | TC/BC level cross signals |
-| Bollinger Bands | ON | Outside-band breakouts |
-| EMA Cross | ON | Fast/slow EMA alignment |
-| RSI Momentum | ON | RSI threshold filter |
-| Chaikin Money Flow | ON | Institutional flow filter |
-| Ichimoku Trend | ON | Conversion/base line filter |
-| Volume Surge | ON | Volume spike confirmation |
+| Setting | Default | Points | What it does |
+|---|---|---|---|
+| CPR Breakout | ON | 3 | TC/BC level cross signals |
+| Volume Surge | ON | 2 | Volume spike + direction confirmation |
+| Bollinger Bands | ON | 2 | Outside-band breakouts |
+| EMA Cross | ON | 1 | Fast/slow EMA alignment |
+| RSI Momentum | ON | 1 | RSI threshold filter |
+| Chaikin Money Flow | ON | 1 | Institutional flow filter |
+| Ichimoku Trend | ON | 1 | Conversion/base line filter |
 
 ### Indicator Parameters
 | Setting | Default | Notes |
@@ -119,7 +125,7 @@ Stop for calls = below TC. Stop for puts = above BC.
 | CMF Length | 20 | Money flow lookback |
 | CMF Threshold | 0.05 | Absolute CMF value needed |
 | Volume Surge Mult | 1.5 | Volume must exceed avg by this |
-| Min Score to Alert | 3 | Minimum score (out of 7) to fire |
+| Min Score to Alert | 7 | Minimum score (out of 11) to fire |
 | Confirmation Bars | 1 | Bars score must hold before alerting |
 
 ### Options Settings
@@ -128,18 +134,28 @@ Stop for calls = below TC. Stop for puts = above BC.
 | OTM Strike % | 1.0% | Distance from price to strike |
 | Days to Expiry | 7 | Weekly = 7, monthly = 30 |
 
+### Debug
+| Setting | Default | Notes |
+|---|---|---|
+| Print score breakdown | OFF | Prints per-indicator contribution to Pine console on each bar close |
+
+To use debug: enable the toggle, open Pine Editor → Console tab. Output format:
+```
+MSFT BULL: CPR+3 BB+2 VOL+2 EMA+1 RSI+1 CMF 0 ICH 0 = 9/11  |  BEAR: CPR 0 BB 0 VOL 0 EMA 0 RSI 0 CMF 0 ICH 0 = 0/11
+```
+
 ---
 
 ## Settings Guide — When to Adjust
 
 **Getting too many alerts (noisy)?**
-- Raise Min Score to 4 or 5
+- Raise Min Score to 9 (requires CPR + Vol + BB all firing)
 - Set Confirmation Bars = 2 (requires two consecutive daily closes)
 - Disable BB (noisy in choppy markets)
 - Disable Ichimoku (less reliable on daily for short setups)
 
 **Missing good setups?**
-- Lower Min Score to 2
+- Lower Min Score to 5–6 (CPR + persistent trend alignment)
 - Keep Confirmation Bars = 1
 - Enable all 7 indicators
 
@@ -184,13 +200,13 @@ Daily bar closes
       ↓
 f_scan() called for each of 20 symbols via request.security("D")
       ↓
-7 indicators scored per symbol → bull_score + bear_score (0-7 each)
+7 indicators scored per symbol with weights → bull_score + bear_score (0-11 each)
       ↓
 f_alert() checks if score crossed confirmation threshold
       ↓
 On flip → alert() fires Discord JSON webhook
       ↓
-Table updates at bar close with live scores for all 20 symbols
+Table updates at bar close with live scores (B x/11 or S x/11) for all 20 symbols
 ```
 
 Premium estimate uses `ATR14 * 0.35`. This is a heuristic — actual option price depends on IV rank, exact DTE, and strike distance. Always check the live chain.
@@ -204,3 +220,4 @@ Premium estimate uses `ATR14 * 0.35`. This is a heuristic — actual option pric
 - **Strike rounding to $5** may miss exact levels for very high-priced stocks (e.g. AVGO at $800 — a 1% OTM put would be $800 → $795)
 - **Expiry date** is calendar days from bar date, not the actual Friday expiry — verify in your broker
 - **No IV filter** — script doesn't know if options are cheap or expensive; check IV rank separately before trading
+- **Score 11/11 is rare by design** — requires CPR breakout (3), volume surge (2), and BB breakout (2) all on the same bar, plus all four trend indicators aligned. The bottleneck is BB + Vol both firing simultaneously while price is also clearing CPR

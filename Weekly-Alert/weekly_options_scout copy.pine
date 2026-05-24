@@ -126,12 +126,12 @@ f_alert(string sym, float pr, int bsc, int esc, float bc, float tc, float s1, fl
     smax = str.tostring(math.max(bsc, esc)) + "/11"
 
     if bf
-        trig = pr > tc ? "TC cleared" : "EMA aligned bullish"
-        alert('{"embeds":[{"color":3066993,"title":"🟢 CALL — ' + sym + " " + elbl + " " + str.tostring(calk, "#") + 'C","description":"💰 Est. $' + prem + "  |  **" + smax + " [" + cfs + "]** · " + cbs + '-bar confirmed' + NL + NL + '📈 **Trigger:** ' + trig + " at $" + str.tostring(tc, "#.##") + NL + '🎯 **Targets:** R1 $' + str.tostring(r1, "#.##") + "  →  R2 $" + str.tostring(r2, "#.##") + NL + '🛑 **Stop:** below TC $' + str.tostring(tc, "#.##") + '","footer":{"text":"Weekly Options Scout • Daily"}}]}', alert.freq_once_per_bar)
+        sig = pr > tc ? "CPR TC Break" : "EMA + Momentum"
+        alert('{"content":"@bot BOUGHT | ' + sym + " " + elbl + " " + str.tostring(calk, "#") + "C $" + prem + NL + "Signal: " + sig + " [" + cfs + " conf] Score " + smax + " (" + cbs + "-bar confirmed)" + NL + "Trigger: $" + str.tostring(tc, "#.##") + " (TC) cleared" + NL + "Targets: R1 $" + str.tostring(r1, "#.##") + " R2 $" + str.tostring(r2, "#.##") + NL + "Stop: Below TC $" + str.tostring(tc, "#.##") + '"}', alert.freq_once_per_bar)
 
     if ef
-        trig = pr < bc ? "BC broken" : "EMA aligned bearish"
-        alert('{"embeds":[{"color":15158332,"title":"🔴 PUT — ' + sym + " " + elbl + " " + str.tostring(putk, "#") + 'P","description":"💰 Est. $' + prem + "  |  **" + smax + " [" + cfs + "]** · " + cbs + '-bar confirmed' + NL + NL + '📉 **Trigger:** ' + trig + " at $" + str.tostring(bc, "#.##") + NL + '🎯 **Targets:** S1 $' + str.tostring(s1, "#.##") + "  →  S2 $" + str.tostring(s2, "#.##") + NL + '🛑 **Stop:** above BC $' + str.tostring(bc, "#.##") + '","footer":{"text":"Weekly Options Scout • Daily"}}]}', alert.freq_once_per_bar)
+        sig = pr < bc ? "CPR BC Break" : "EMA + Momentum"
+        alert('{"content":"@bot BOUGHT | ' + sym + " " + elbl + " " + str.tostring(putk, "#") + "P $" + prem + NL + "Signal: " + sig + " [" + cfs + " conf] Score " + smax + " (" + cbs + "-bar confirmed)" + NL + "Trigger: $" + str.tostring(bc, "#.##") + " (BC) broken" + NL + "Targets: S1 $" + str.tostring(s1, "#.##") + " S2 $" + str.tostring(s2, "#.##") + NL + "Stop: Above BC $" + str.tostring(bc, "#.##") + '"}', alert.freq_once_per_bar)
 
 // ── Fire Alerts ──────────────────────────────────────────────────────────────
 f_alert("SPY",   p1,  bu1,  be1,  bc1,  tc1,  s11,  s21,  r11,  r21,  a1,  pk1,  ck1)
